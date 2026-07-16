@@ -1,0 +1,862 @@
+#!/usr/bin/env python3
+"""
+ytscout — a free, local, keyless replacement for the parts of vidIQ and TubeBuddy
+that actually move the needle, grounded in Adam's consensus doctrine.
+
+Data: yt-dlp (no API key). Brain: local gemma4:12b via ollama (optional). Deps: stdlib only.
+
+Commands:
+  scout outliers <handle> [--vs h1,h2,...] [--min-views N] [--days N] [--top N] [--html]
+  scout title "<proposed title>" [--ai]
+  scout niche "<search query>" [--n N] [--html]
+  scout audit <handle> [--html]
+
+Doctrine source: ~/content-engine/strategy/youtube-consensus-doctrine.md
+"""
+import sys, os, json, re, time, argparse, statistics, html, urllib.request
+
+CACHE_DIR = os.path.expanduser("~/ytscout/.cache")
+REPORT_DIR = os.path.expanduser("~/ytscout/reports")
+CACHE_TTL = 6 * 3600  # 6 hours
+SHORT_MAX_SEC = 60    # treat <=60s as a Short for outlier/audit purposes
+OLLAMA_URL = "http://localhost:11434/api/generate"
+
+os.makedirs(CACHE_DIR, exist_ok=True)
+os.makedirs(REPORT_DIR, exist_ok=True)
+WATCHLIST = os.path.expanduser("~/ytscout/watchlist.json")
+
+# RPM (creator's actual $ per 1000 views) by niche — from the consensus doctrine's
+# cross-verified tiers (vidIQ 6-video agreement). AdSense only; the real money is owned products.
+RPM_TIERS = {
+    "gaming": 2.0, "entertainment": 2.0, "vlog": 2.0, "lifestyle": 2.5,
+    "family": 3.0, "homeschool": 3.5, "education": 5.0, "tech": 5.5,
+    "tutorial": 5.5, "productivity": 6.0, "ai": 7.0, "software": 8.0,
+    "business": 10.0, "finance": 12.0, "marketing": 10.0,
+}
+DEFAULT_RPM = 4.0
+
+MIDROLL_SEC = 480  # 8:00 — the doctrine's mid-roll ad threshold (a 9-min video out-earned an 8-min one by $750)
+MIDROLL_MULT = 1.6  # long videos carry mid-rolls = more ad inventory
+
+def real_rpm(niche, override=None):
+    """Adam's own RPM (from Studio) beats any niche guess. Order: explicit override > saved config > niche tier > default."""
+    if override is not None:
+        return override
+    cfg = os.path.expanduser("~/ytscout/rpm.json")
+    if os.path.exists(cfg):
+        try:
+            saved = json.load(open(cfg))
+            if niche and niche in saved:
+                return saved[niche]
+            if "default" in saved:
+                return saved["default"]
+        except Exception:
+            pass
+    return RPM_TIERS.get(niche, DEFAULT_RPM) if niche else DEFAULT_RPM
+
+def est_rev(views, rpm, dur=0):
+    eff = rpm * MIDROLL_MULT if dur and dur >= MIDROLL_SEC else rpm
+    return (views / 1000.0) * eff
+
+def money(n):
+    if n is None:
+        return "?"
+    if n >= 1000:
+        return f"${n/1000:.1f}k"
+    return f"${n:.0f}"
+
+# ---------- yt-dlp data layer (cached) ----------
+
+def _cache_path(key):
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", key)
+    return os.path.join(CACHE_DIR, safe + ".json")
+
+def _cache_get(key):
+    p = _cache_path(key)
+    if os.path.exists(p) and (time.time() - os.path.getmtime(p)) < CACHE_TTL:
+        try:
+            return json.load(open(p))
+        except Exception:
+            return None
+    return None
+
+def _cache_put(key, data):
+    try:
+        json.dump(data, open(_cache_path(key), "w"))
+    except Exception:
+        pass
+
+def _ydl(url, limit):
+    # Non-flat extraction is the only reliable free way to get view counts.
+    # Bounded to `limit` recent items so it stays fast; results are cached hard.
+    import yt_dlp
+    opts = {"quiet": True, "no_warnings": True, "skip_download": True,
+            "extract_flat": False, "playlist_items": f"1-{limit}"}
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        return ydl.extract_info(url, download=False)
+
+def channel_dump(handle, limit=30):
+    """Return {name, subs, videos:[{id,title,views,dur,date}]}. Cached 6h."""
+    handle = handle.lstrip("@")
+    key = f"chan_{handle}_{limit}"
+    cached = _cache_get(key)
+    if cached:
+        return cached
+    sys.stderr.write(f"  … fetching @{handle} ({limit} recent, ~{limit}s first time; cached after)\n"); sys.stderr.flush()
+    try:
+        info = _ydl(f"https://www.youtube.com/@{handle}/videos", limit)
+    except Exception as e:
+        return {"error": str(e), "name": handle, "subs": None, "videos": []}
+    vids = []
+    for e in (info.get("entries") or []):
+        if not e:
+            continue
+        vids.append({
+            "id": e.get("id"),
+            "title": e.get("title") or "",
+            "views": e.get("view_count") or 0,
+            "dur": e.get("duration") or 0,
+            "date": e.get("upload_date"),  # reliable in non-flat mode (YYYYMMDD)
+        })
+    out = {
+        "name": info.get("channel") or info.get("uploader") or handle,
+        "subs": info.get("channel_follower_count"),
+        "videos": vids,
+    }
+    _cache_put(key, out)
+    return out
+
+def search_dump(query, n=20):
+    key = f"search_{query}_{n}"
+    cached = _cache_get(key)
+    if cached:
+        return cached
+    sys.stderr.write(f"  … searching \"{query}\" ({n} results, ~{n}s first time; cached after)\n"); sys.stderr.flush()
+    try:
+        info = _ydl(f"ytsearch{n}:{query}", n)
+    except Exception as e:
+        return {"error": str(e), "results": []}
+    res = []
+    for e in (info.get("entries") or []):
+        if not e:
+            continue
+        res.append({
+            "id": e.get("id"),
+            "title": e.get("title") or "",
+            "views": e.get("view_count") or 0,
+            "dur": e.get("duration") or 0,
+            "channel": e.get("channel") or e.get("uploader") or "?",
+            "subs": e.get("channel_follower_count"),
+        })
+    out = {"results": res}
+    _cache_put(key, out)
+    return out
+
+# ---------- ollama (optional brain) ----------
+
+def ollama(prompt, num_ctx=8192):
+    body = json.dumps({"model": "gemma4:12b", "prompt": prompt, "stream": False,
+                       "think": False, "options": {"num_ctx": num_ctx, "temperature": 0.4}}).encode()
+    req = urllib.request.Request(OLLAMA_URL, data=body, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            return json.loads(r.read())["response"].strip()
+    except Exception as e:
+        return f"[ollama unavailable: {e}]"
+
+# ---------- formatting helpers ----------
+
+def human(n):
+    if n is None:
+        return "?"
+    n = int(n)
+    for unit, div in (("M", 1_000_000), ("K", 1_000)):
+        if n >= div:
+            return f"{n/div:.1f}{unit}"
+    return str(n)
+
+def table(rows, headers):
+    cols = list(zip(*([headers] + rows))) if rows else [[h] for h in headers]
+    widths = [max(len(str(c)) for c in col) for col in cols]
+    line = lambda r: "  ".join(str(c).ljust(w) for c, w in zip(r, widths))
+    out = [line(headers), "  ".join("-" * w for w in widths)]
+    out += [line(r) for r in rows]
+    return "\n".join(out)
+
+EMOJI_RE = re.compile(
+    "[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F000-\U0001F0FF\U00002190-\U000021FF\U00002B00-\U00002BFF]")
+
+# ---------- Command: outliers (the crown jewel) ----------
+
+def cmd_outliers(args):
+    handles = [args.handle] + (args.vs.split(",") if args.vs else [])
+    handles = [h.strip().lstrip("@") for h in handles if h.strip()]
+    print(f"\n\033[1mOUTLIER FINDER\033[0m  (view-to-subscriber ratio = the #1 idea-validation signal, 6 corpora agree)\n")
+    all_rows = []
+    html_rows = []
+    for h in handles:
+        ch = channel_dump(h, limit=args.scan)
+        if ch.get("error"):
+            print(f"  ! {h}: {ch['error']}")
+            continue
+        subs = ch.get("subs") or 0
+        vids = [v for v in ch["videos"] if v["dur"] > SHORT_MAX_SEC and v["views"] >= args.min_views]
+        if not vids:
+            print(f"  ! {h}: no long-form videos above {args.min_views} views")
+            continue
+        med = statistics.median([v["views"] for v in vids]) or 1
+        for v in vids:
+            v["ch"] = ch["name"]
+            v["subs"] = subs
+            # two multipliers the doctrine names:
+            v["vsr"] = round(v["views"] / subs, 2) if subs else None   # view-to-subscriber (AmplifyViews)
+            v["osc"] = round(v["views"] / med, 2)                       # outlier score vs channel median (vidIQ/One10)
+        all_rows.extend(vids)
+    if not all_rows:
+        print("  No data. Check the handles (use the exact @handle).")
+        return
+    # rank: prefer view-to-sub where available, else outlier score
+    rpm = real_rpm(args.niche, getattr(args, "rpm", None))
+    ranked = sorted(all_rows, key=lambda v: (v["vsr"] or 0, v["osc"]), reverse=True)[:args.top]
+    rows = []
+    for v in ranked:
+        vsr = f"{v['vsr']}x" if v["vsr"] is not None else "—"
+        v["rev"] = est_rev(v["views"], rpm, v["dur"])
+        rows.append([vsr, f"{v['osc']}x", human(v["views"]), money(v["rev"]),
+                     human(v["subs"]), v["ch"][:15], v["title"][:52]])
+        html_rows.append(v)
+    print(table(rows, ["V/Sub", "vsMed", "Views", "Est$", "Subs", "Channel", "Title"]))
+    print(f"\n  V/Sub = views ÷ subscribers (5x+ strong, 20x gold — AmplifyViews).  vsMed = views ÷ channel median (3x+ = vidIQ outlier).")
+    print(f"  Est$ = est. AdSense at ${rpm:.0f} RPM ({args.niche or 'default'} niche) — the FLOOR. Owned products earn far more (doctrine).")
+    print(f"  These titles are PROVEN ideas. Port the concept into your niche (Niche Comparison Theory).\n")
+
+    if args.ai and ranked:
+        top = ranked[0]
+        print("\033[1m  Porting the #1 outlier into your niche (gemma4:12b):\033[0m")
+        prompt = (f"This YouTube video is an outlier: \"{top['title']}\" got {top['views']} views on a "
+                  f"channel with {top['subs']} subscribers. Adam runs two channels: a family/homeschool "
+                  f"channel (Brooke+Adam) and an AI 'build software with Claude' channel. Give 3 video title "
+                  f"ideas that port this proven concept into EACH of his two niches. Plain text, no emojis, "
+                  f"6-8 words per title, keep the psychological hook that made the original work.")
+        print("  " + ollama(prompt).replace("\n", "\n  ") + "\n")
+
+    if args.html:
+        write_outlier_html(handles, html_rows)
+
+def write_outlier_html(handles, vids):
+    path = os.path.join(REPORT_DIR, "outliers.html")
+    rows = "".join(
+        f"<tr><td>{v['vsr'] or '—'}x</td><td>{v['osc']}x</td><td>{human(v['views'])}</td>"
+        f"<td>{human(v['subs'])}</td><td>{html.escape(v['ch'])}</td>"
+        f"<td><a href='https://youtu.be/{v['id']}'>{html.escape(v['title'])}</a></td></tr>"
+        for v in vids)
+    doc = f"""<!doctype html><meta charset=utf-8><title>ytscout outliers</title>
+<style>body{{font:15px/1.5 -apple-system,system-ui,sans-serif;max-width:1000px;margin:2rem auto;padding:0 1rem}}
+h1{{font-size:1.4rem}}table{{border-collapse:collapse;width:100%}}td,th{{padding:.4rem .6rem;border-bottom:1px solid #ddd;text-align:left}}
+th{{font-size:.8rem;text-transform:uppercase;color:#666}}a{{color:#0645ad;text-decoration:none}}</style>
+<h1>Outlier finder</h1><p>Channels: {html.escape(', '.join(handles))}. V/Sub = views ÷ subscribers (5x+ strong, 20x gold). vsMed = views ÷ channel median (3x+ = outlier).</p>
+<table><tr><th>V/Sub</th><th>vs Median</th><th>Views</th><th>Subs</th><th>Channel</th><th>Title</th></tr>{rows}</table>"""
+    open(path, "w").write(doc)
+    print(f"  → HTML report: {path}")
+
+# ---------- Command: title analyzer ----------
+
+FRAMES = {
+    "witness": r"\b(caught|on camera|footage|watch|i saw|exposed|watched)\b",
+    "transformation": r"\b(turn(ed|ing|s)? .* into|from .* to |transform|became|replaced|makes? .* (into|from))\b",
+    "access": r"\b(inside|behind the scenes|secret|how .* actually|the truth about|the real reason|only job)\b",
+    "insider": r"\b(nobody|no one|what .* won'?t tell|they don'?t want|hidden|what .* isn'?t telling)\b",
+    "credibility": r"\b(after \d+ years|\d+ years of|i (built|made|grew|spent|studied|tried|used))\b",
+    "forbidden": r"\b(banned|illegal|not allowed|forbidden|shouldn'?t|can'?t)\b",
+    "negative": r"\b(mistake|wrong|stop|never|worst|kill(s|ed|ing)?|ruin|fail|dead|broke|don'?t|bad|hate|avoid|destroy|dumb|boring)\b",
+    "question": r"\?",
+    "number-outcome": r"\$?\d[\d,\.]*\s*(k|m|subs|subscribers|days|hours|dollars|/mo|per|month)",
+}
+
+def cmd_title(args):
+    t = args.text.strip()
+    words = t.split()
+    chars = len(t)
+    emojis = EMOJI_RE.findall(t)
+    has_number = bool(re.search(r"\d", t))
+    frames = [name for name, pat in FRAMES.items() if re.search(pat, t, re.I)]
+
+    score = 100
+    notes = []
+    # word count (doctrine: 6-7 words ideal, from the 9M-video study)
+    wc = len(words)
+    if 5 <= wc <= 8:
+        notes.append(("ok", f"{wc} words — in the 6-7 word sweet spot (9M-video study)"))
+    elif wc < 5:
+        score -= 10; notes.append(("warn", f"{wc} words — a bit short; 6-7 is the data-backed sweet spot"))
+    else:
+        score -= 15; notes.append(("warn", f"{wc} words — long; 16+ words is the worst performer, trim toward 6-7"))
+    # char count (<60 ideal, <30 bonus, >70 truncates on mobile)
+    if chars <= 30:
+        notes.append(("ok", f"{chars} chars — under 30, the 2026 data study's top view bucket"))
+    elif chars <= 60:
+        notes.append(("ok", f"{chars} chars — under 60, clean on mobile"))
+    elif chars <= 70:
+        score -= 8; notes.append(("warn", f"{chars} chars — trim under 60 so mobile doesn't cut it"))
+    else:
+        score -= 18; notes.append(("bad", f"{chars} chars — will truncate on mobile; cut under 60"))
+    # emojis on long-form (data study: -11% views)
+    if emojis:
+        score -= 12; notes.append(("bad", f"emoji(s) {''.join(emojis)} — drop for long-form (-11% views in the 128M-video study; fine on Shorts)"))
+    else:
+        notes.append(("ok", "no emojis — correct for long-form reach"))
+    # numbers (data study: no-number titles got 11% more views on long-form; but number-outcome frames still win)
+    if has_number and "number-outcome" not in frames:
+        score -= 5; notes.append(("warn", "has a number that isn't a payoff — the 4M-title study found bare numbers underperform; make it an outcome ($10k, 1000 subs) or cut it"))
+    # frames (doctrine: stack 3-4 psychological frames; top titles stack)
+    if len(frames) >= 3:
+        notes.append(("ok", f"stacks {len(frames)} frames ({', '.join(frames)}) — top titles stack 3-4"))
+    elif len(frames) >= 1:
+        score -= 6; notes.append(("warn", f"only {len(frames)} frame ({', '.join(frames)}) — stack more (witness, transformation, access, insider, credibility, forbidden, negative-emotion)"))
+    else:
+        score -= 18; notes.append(("bad", "no psychological frame detected — the title states, it doesn't hook. Add a frame."))
+    score = max(0, min(100, score))
+
+    color = "\033[32m" if score >= 80 else "\033[33m" if score >= 60 else "\033[31m"
+    print(f"\n\033[1mTITLE ANALYZER\033[0m")
+    print(f'  "{t}"')
+    print(f"  {color}Score: {score}/100\033[0m\n")
+    ic = {"ok": "\033[32m✓\033[0m", "warn": "\033[33m~\033[0m", "bad": "\033[31m✗\033[0m"}
+    for kind, msg in notes:
+        print(f"  {ic[kind]} {msg}")
+    if args.ai:
+        print("\n\033[1m  5 stronger variants (gemma4:12b, doctrine-grounded):\033[0m")
+        prompt = (f'Rewrite this YouTube title 5 ways, each STRONGER: "{t}". Rules from real data studies: '
+                  f'6-7 words, under 60 characters, NO emojis, stack psychological frames (witness/transformation/'
+                  f'access/insider/credibility/forbidden/negative-emotion), curiosity over information, specific '
+                  f'outcomes not bare numbers. Output 5 titles only, numbered, no commentary.')
+        print("  " + ollama(prompt).replace("\n", "\n  ") + "\n")
+    print()
+
+# ---------- Command: niche research ----------
+
+def cmd_niche(args):
+    print(f"\n\033[1mNICHE / KEYWORD RESEARCH\033[0m  \"{args.query}\"\n")
+    d = search_dump(args.query, args.n)
+    if d.get("error"):
+        print("  ! " + d["error"]); return
+    res = [r for r in d["results"] if r["dur"] > SHORT_MAX_SEC]
+    if not res:
+        print("  No long-form results."); return
+    views = sorted([r["views"] for r in res], reverse=True)
+    total = sum(views) or 1
+    top3_share = sum(views[:3]) / total
+    med = statistics.median(views)
+    rows = []
+    for r in sorted(res, key=lambda x: x["views"], reverse=True)[:15]:
+        mult = round(r["views"] / med, 1) if med else 0
+        rows.append([human(r["views"]), f"{mult}x", r["channel"][:20], r["title"][:56]])
+    print(table(rows, ["Views", "vsMed", "Channel", "Title"]))
+    print(f"\n  Median views on page: {human(med)}   |   Top-3 own {top3_share*100:.0f}% of the views")
+    if top3_share > 0.7:
+        print("  \033[33mSaturated at the top\033[0m — a few big channels dominate. Bend the angle (Niche Comparison Theory) rather than compete head-on.")
+    else:
+        print("  \033[32mViews are spread\033[0m — room for a well-packaged newcomer. Model the highest vsMed title.")
+    print("  Note: yt-dlp shows public views, not search volume/competition scores (those need a paid API). Views distribution is the free proxy.\n")
+    if args.html:
+        path = os.path.join(REPORT_DIR, "niche.html")
+        rows_h = "".join(f"<tr><td>{human(r['views'])}</td><td>{html.escape(r['channel'])}</td>"
+                         f"<td><a href='https://youtu.be/{r['id']}'>{html.escape(r['title'])}</a></td></tr>"
+                         for r in sorted(res, key=lambda x: x['views'], reverse=True)[:15])
+        open(path, "w").write(f"<!doctype html><meta charset=utf-8><title>niche: {html.escape(args.query)}</title>"
+            f"<style>body{{font:15px/1.5 system-ui;max-width:900px;margin:2rem auto}}td{{padding:.3rem .6rem;border-bottom:1px solid #ddd}}a{{color:#0645ad}}</style>"
+            f"<h1>Niche: {html.escape(args.query)}</h1><table>{rows_h}</table>")
+        print(f"  → HTML report: {path}\n")
+
+# ---------- Command: channel audit ----------
+
+# doctrine length zones (Nate Black TimeZone), seconds
+def zone(dur):
+    m = dur / 60
+    if m < 4: return "meme(0-4m)"
+    if m < 6: return "moment(4-6m)*dead"
+    if m < 8: return "rare(6-8m)"
+    if m < 12: return "standard(8-12m)"
+    if m < 16: return "stretch(12-16m)*dead"
+    if m < 20: return "odd(16-20m)*dead"
+    if m < 30: return "highvalue(20-30m)"
+    return "extra(30m+)"
+
+def cmd_audit(args):
+    ch = channel_dump(args.handle)
+    if ch.get("error"):
+        print("  ! " + ch["error"]); return
+    subs = ch.get("subs") or 0
+    longs = [v for v in ch["videos"] if v["dur"] > SHORT_MAX_SEC]
+    shorts = [v for v in ch["videos"] if v["dur"] <= SHORT_MAX_SEC]
+    print(f"\n\033[1mCHANNEL AUDIT\033[0m  {ch['name']}  ({human(subs)} subs, {len(ch['videos'])} recent videos)\n")
+    if not longs:
+        print("  No long-form videos found."); return
+    views = [v["views"] for v in longs]
+    med = statistics.median(views)
+    best = max(longs, key=lambda v: v["views"])
+    titlelens = [len(v["title"]) for v in longs]
+    long_titles = [v for v in longs if len(v["title"]) > 60]
+    zones = {}
+    for v in longs:
+        zones[zone(v["dur"])] = zones.get(zone(v["dur"]), 0) + 1
+    shorts_ratio = len(shorts) / max(1, len(ch["videos"]))
+
+    print(f"  Median long-form views: {human(med)}")
+    print(f"  Best recent: {human(best['views'])} — \"{best['title'][:60]}\"")
+    print(f"  Best-to-median ratio: {best['views']/med:.1f}x  " +
+          ("(healthy outlier)" if best['views']/med >= 3 else "(no breakout recently — model other niches)"))
+    print(f"  Shorts / long-form mix: {shorts_ratio*100:.0f}% Shorts  " +
+          ("(near the 30/70 doctrine target)" if 0.2 <= shorts_ratio <= 0.4 else "(doctrine target is ~30% Shorts / 70% long)"))
+    # revenue estimate
+    rpm = real_rpm(args.niche, getattr(args, "rpm", None))
+    recent_views = sum(v["views"] for v in longs)
+    # rough monthly: if we can date them, use last-30-day views; else annualize the median as a floor
+    dated = [v for v in longs if v.get("date")]
+    per_video_rev = est_rev(med, rpm, med and 500)  # assume typical long-form gets midroll
+    print(f"\n  \033[1mMoney (est. AdSense at ${rpm:.0f} RPM, {args.niche or 'default'} niche):\033[0m")
+    print(f"  Typical video (~{human(med)} views): {money(per_video_rev)} in ad revenue")
+    print(f"  Best recent (~{human(best['views'])} views): {money(est_rev(best['views'], rpm, best['dur']))}")
+    print(f"  These {len(longs)} recent long-forms: ~{money(est_rev(recent_views, rpm, 500))} total AdSense")
+    print(f"  \033[2mAdSense is the FLOOR. Doctrine: 1,000 superfans × $100/yr = $100k — owned products (guides, community, Nudge) beat ad revenue at every size.\033[0m")
+    print()
+    print("  \033[1mFlags (per consensus doctrine):\033[0m")
+    if long_titles:
+        print(f"  \033[33m~\033[0m {len(long_titles)}/{len(longs)} titles over 60 chars — will truncate on mobile. e.g. \"{long_titles[0]['title'][:70]}...\"")
+    else:
+        print("  \033[32m✓\033[0m titles are within 60 chars")
+    dead = sum(zones.get(z, 0) for z in zones if "*dead" in z)
+    if dead:
+        print(f"  \033[33m~\033[0m {dead} videos land in length dead-zones (4-6m, 12-16m, 16-20m). Aim 8-12m or 20-30m (Nate Black TimeZone).")
+    else:
+        print("  \033[32m✓\033[0m video lengths avoid the dead zones")
+    cons = statistics.pstdev(views) / med if med else 0
+    if cons > 1.5:
+        print(f"  \033[33m~\033[0m view counts are erratic (spread {cons:.1f}x median) — packaging or niche coherence is inconsistent")
+    else:
+        print(f"  \033[32m✓\033[0m view counts are relatively consistent")
+    print(f"\n  Length distribution: " + ", ".join(f"{z}:{n}" for z, n in sorted(zones.items(), key=lambda x:-x[1])))
+    print("\n  \033[2mHonest limit: CTR, retention, and impressions need OAuth to YOUR OWN channel's Analytics API.")
+    print("  ytscout audits any channel's PUBLIC data (views, titles, lengths, cadence). Private metrics = a future --mine mode.\033[0m\n")
+
+# ---------- Command: feed (see your title+thumbnail among REAL niche videos) ----------
+
+def _yt_views(n):
+    if n is None or n == 0:
+        return "NEW"
+    for u, d in (("M", 1_000_000), ("K", 1_000)):
+        if n >= d:
+            return f"{n/d:.1f}{u} views"
+    return f"{n} views"
+
+def _b64_img(path):
+    import base64, mimetypes
+    try:
+        mt = mimetypes.guess_type(path)[0] or "image/jpeg"
+        return f"data:{mt};base64," + base64.b64encode(open(path, "rb").read()).decode()
+    except Exception:
+        return None
+
+def cmd_feed(args):
+    d = search_dump(args.query, args.n)
+    if d.get("error"):
+        print("  ! " + d["error"]); return
+    vids = [v for v in d["results"] if v["dur"] > SHORT_MAX_SEC][:args.n]
+    if not vids:
+        print("  No results."); return
+
+    # Adam's card
+    my_thumb = _b64_img(args.my_thumb) if args.my_thumb else None
+    my = {
+        "title": args.my_title or "[your proposed title here]",
+        "channel": "Your Channel",
+        "views_str": "NEW",
+        "thumb": my_thumb,  # data URI or None -> placeholder
+        "mine": True,
+    }
+    cards = []
+    for v in vids:
+        cards.append({
+            "title": v["title"],
+            "channel": v["channel"],
+            "views_str": _yt_views(v["views"]),
+            "thumb": f"https://i.ytimg.com/vi/{v['id']}/hqdefault.jpg",
+            "mine": False,
+        })
+    pos = max(0, min(len(cards), args.pos))
+    cards.insert(pos, my)
+
+    def card_html(c):
+        cls = "card mine" if c.get("mine") else "card"
+        if c["thumb"]:
+            thumb = f"<img class=thumb src='{c['thumb']}' alt=''>"
+        else:
+            thumb = f"<div class='thumb ph'>{html.escape(c['title'][:40])}</div>"
+        badge = "<span class=badge>YOU</span>" if c.get("mine") else ""
+        return (f"<div class='{cls}'>{thumb}{badge}"
+                f"<div class=meta><div class=title>{html.escape(c['title'])}</div>"
+                f"<div class=sub>{html.escape(c['channel'])} · {c['views_str']}</div></div></div>")
+
+    grid = "".join(card_html(c) for c in cards)
+    doc = f"""<!doctype html><meta charset=utf-8><title>ytscout feed — {html.escape(args.query)}</title>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<style>
+:root{{--bg:#0f0f0f;--fg:#f1f1f1;--sub:#aaa}}
+@media(prefers-color-scheme:light){{:root{{--bg:#fff;--fg:#0f0f0f;--sub:#606060}}}}
+body{{margin:0;background:var(--bg);color:var(--fg);font:14px/1.4 Roboto,-apple-system,system-ui,sans-serif}}
+header{{padding:14px 20px;font-size:15px;color:var(--sub);border-bottom:1px solid #8883}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px 12px;padding:20px}}
+.card{{cursor:pointer;position:relative}}
+.thumb{{width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:12px;display:block;background:#333}}
+.thumb.ph{{display:flex;align-items:center;justify-content:center;text-align:center;padding:8px;color:#ddd;
+  background:linear-gradient(135deg,#3a3a3a,#555);font-weight:600;box-sizing:border-box}}
+.meta{{padding:10px 2px}}
+.title{{font-weight:600;font-size:15px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}}
+.sub{{color:var(--sub);font-size:13px;margin-top:3px}}
+.mine .thumb{{outline:3px solid #3ea6ff;outline-offset:2px}}
+.badge{{position:absolute;top:8px;left:8px;background:#3ea6ff;color:#001;font-weight:700;
+  font-size:11px;padding:2px 7px;border-radius:4px;letter-spacing:.5px}}
+</style>
+<header>Test feed · niche: <b>{html.escape(args.query)}</b> · your card is outlined in blue. Does your packaging stop the scroll?</header>
+<div class=grid>{grid}</div>"""
+    path = os.path.join(REPORT_DIR, "feed.html")
+    open(path, "w").write(doc)
+    print(f"\n\033[1mTEST FEED\033[0m built with {len(vids)} real '{args.query}' videos + your card at position {pos+1}.")
+    print(f"  → {path}")
+    print(f"  Open it and ask: does YOUR thumbnail/title pull the eye, or blend in? (thumbsup.tv-style preview, doctrine's pre-upload gate)\n")
+    if args.open:
+        os.system(f"open '{path}' 2>/dev/null")
+
+# ---------- Command: weekly (the automatable idea-farm ritual, zero AI) ----------
+
+def load_watchlist():
+    """Schema: {"lists": {name: {"handles":[...], "niche": str}}, "active": name}.
+    Migrates the old flat {"handles","niche"} shape on read."""
+    data = {"lists": {}, "active": None}
+    if os.path.exists(WATCHLIST):
+        try:
+            raw = json.load(open(WATCHLIST))
+            if "lists" in raw:
+                data = raw
+            elif raw.get("handles"):  # migrate old flat shape
+                nm = raw.get("niche") or "default"
+                data = {"lists": {nm: {"handles": raw["handles"], "niche": raw.get("niche")}}, "active": nm}
+        except Exception:
+            pass
+    return data
+
+def _active_list(data, name=None):
+    name = name or data.get("active")
+    return name, data["lists"].get(name, {"handles": [], "niche": None})
+
+def cmd_watch(args):
+    data = load_watchlist()
+    name = args.list or data.get("active") or (args.niche if args.niche else "default")
+    lst = data["lists"].setdefault(name, {"handles": [], "niche": args.niche or name})
+    if args.niche:
+        lst["niche"] = args.niche
+    if args.add:
+        for h in args.add.split(","):
+            h = h.strip().lstrip("@")
+            if h and h not in lst["handles"]:
+                lst["handles"].append(h)
+    if args.remove:
+        lst["handles"] = [h for h in lst["handles"] if h.lower() != args.remove.strip().lstrip("@").lower()]
+    if args.activate or not data.get("active"):
+        data["active"] = name
+    json.dump(data, open(WATCHLIST, "w"), indent=2)
+    print(f"\n  Watchlists ({WATCHLIST}):")
+    for nm, l in data["lists"].items():
+        star = " \033[32m(active)\033[0m" if nm == data.get("active") else ""
+        print(f"\n  \033[1m{nm}\033[0m — niche {l.get('niche') or '?'}{star}")
+        for h in l["handles"]:
+            print(f"   • @{h}")
+        if not l["handles"]:
+            print("   (empty)")
+    print(f"\n  Weekly runs the ACTIVE list. Switch with: scout watch --list <name> --activate\n")
+
+def cmd_weekly(args):
+    data = load_watchlist()
+    name, lst = _active_list(data, getattr(args, "list", None))
+    handles = lst.get("handles", [])
+    niche = args.niche or lst.get("niche")
+    rpm = real_rpm(niche, getattr(args, "rpm", None))
+    if not handles:
+        print("\n  Watchlist is empty. Add channels first:\n    scout watch --add handle1,handle2 --niche ai\n")
+        return
+    print(f"\n\033[1mWEEKLY IDEA FARM\033[0m  {len(handles)} channels, {niche or 'default'} niche (${rpm:.0f} RPM)\n")
+    seen_path = os.path.join(CACHE_DIR, "weekly_seen.json")
+    seen = set(json.load(open(seen_path))) if os.path.exists(seen_path) else set()
+    finds = []
+    for h in handles:
+        ch = channel_dump(h, limit=args.scan)
+        if ch.get("error"):
+            print(f"  ! {h}: {ch['error']}"); continue
+        subs = ch.get("subs") or 0
+        vids = [v for v in ch["videos"] if v["dur"] > SHORT_MAX_SEC and v["views"] >= args.min_views]
+        med = statistics.median([v["views"] for v in vids]) or 1
+        for v in vids:
+            v["ch"] = ch["name"]; v["subs"] = subs
+            v["vsr"] = round(v["views"]/subs, 2) if subs else None
+            v["osc"] = round(v["views"]/med, 2)
+            v["rev"] = est_rev(v["views"], rpm, v["dur"])
+            v["new"] = v["id"] not in seen
+        finds.extend(vids)
+    # keep only real outliers (vsr>=2 OR osc>=3) and rank
+    hot = [v for v in finds if (v["vsr"] or 0) >= 2 or v["osc"] >= 3]
+    hot.sort(key=lambda v: (v["new"], v["vsr"] or 0, v["osc"]), reverse=True)
+    hot = hot[:args.top]
+    rows = []
+    for v in hot:
+        flag = "\033[32mNEW\033[0m" if v["new"] else "   "
+        vsr = f"{v['vsr']}x" if v["vsr"] is not None else "—"
+        rows.append([flag, vsr, f"{v['osc']}x", human(v["views"]), money(v["rev"]), v["ch"][:14], v["title"][:48]])
+    print(table([[c for c in r] for r in rows], ["", "V/Sub", "vsMed", "Views", "Est$", "Channel", "Title"]))
+    newcount = sum(1 for v in hot if v["new"])
+    print(f"\n  {newcount} NEW outliers since last run, {len(hot)-newcount} standing. These are proven ideas to port into your niche this week.")
+    print(f"  Est$ = AdSense floor at ${rpm:.0f} RPM. The play is the CONCEPT, monetized by owned products.\n")
+    # persist seen + write dated report
+    json.dump(sorted(set(list(seen) + [v["id"] for v in finds])), open(seen_path, "w"))
+    _write_weekly_report(handles, niche, rpm, hot, name)
+
+def _write_weekly_report(handles, niche, rpm, hot, listname=None):
+    stamp = time.strftime("%Y-%m-%d")  # real OS date
+    tag = f"-{listname}" if listname else ""
+    path = os.path.join(REPORT_DIR, f"weekly{tag}-{stamp}.md")
+    lines = [f"# Weekly idea farm — {stamp}", "",
+             f"Channels: {', '.join('@'+h for h in handles)}  |  niche: {niche or 'default'} (${rpm:.0f} RPM)", "",
+             "| New | V/Sub | vsMed | Views | Est$ | Channel | Title | Link |",
+             "|---|---|---|---|---|---|---|---|"]
+    for v in hot:
+        vsr = f"{v['vsr']}x" if v["vsr"] is not None else "—"
+        lines.append(f"| {'NEW' if v['new'] else ''} | {vsr} | {v['osc']}x | {human(v['views'])} | "
+                     f"{money(v['rev'])} | {v['ch']} | {v['title']} | https://youtu.be/{v['id']} |")
+    lines += ["", "Port each concept into your niche (Niche Comparison Theory). Est$ is the AdSense floor; owned products are the business."]
+    open(path, "w").write("\n".join(lines))
+    print(f"  → Report saved: {path}")
+
+# ---------- Command: mine (YOUR OWN channel's private metrics via OAuth) ----------
+# Uses curl for all Google HTTPS (this Python build has broken SSL certs) + stdlib loopback
+# for the OAuth redirect. One-time setup: a Google Cloud "Desktop app" OAuth client.
+
+OAUTH_DIR = os.path.expanduser("~/ytscout/.oauth")
+OAUTH_PORT = 8731
+SCOPES = "https://www.googleapis.com/auth/yt-analytics.readonly https://www.googleapis.com/auth/youtube.readonly"
+
+def _curl_json(url, data=None, headers=None):
+    """POST/GET via curl (SSL-safe on this box) → parsed JSON."""
+    import subprocess
+    cmd = ["curl", "-s", url]
+    for k, v in (headers or {}).items():
+        cmd += ["-H", f"{k}: {v}"]
+    if data is not None:
+        cmd += ["--data", data]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=60).stdout
+        return json.loads(out) if out.strip() else {}
+    except Exception as e:
+        return {"error": str(e)}
+
+def _load_client():
+    p = os.path.join(OAUTH_DIR, "client_secret.json")
+    if not os.path.exists(p):
+        return None
+    d = json.load(open(p))
+    c = d.get("installed") or d.get("web") or d
+    return {"id": c["client_id"], "secret": c["client_secret"]}
+
+def _mine_setup_msg():
+    print(f"""
+  \033[1mscout mine — one-time setup (about 5 minutes, all free)\033[0m
+
+  This reads YOUR channel's private stats (CTR, retention, real revenue) that no free tool can see
+  without your permission. You authorize it once; the token stays on this machine.
+
+  1. Go to  https://console.cloud.google.com/  → create a project (or use one you have).
+  2. APIs & Services → Enable APIs → enable "YouTube Analytics API" and "YouTube Data API v3".
+  3. APIs & Services → Credentials → Create Credentials → OAuth client ID → type "Desktop app".
+     (If asked, configure the consent screen: External, add yourself as a test user.)
+  4. Download the client JSON, save it as:  {OAUTH_DIR}/client_secret.json
+  5. Run:  scout mine --auth   (opens your browser once to approve; then just `scout mine`)
+
+  Nothing here costs money. The APIs are free; the token never leaves this machine.
+""")
+
+def _oauth_flow(client):
+    import http.server, socketserver, webbrowser, urllib.parse
+    code_box = {}
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            q = urllib.parse.urlparse(self.path).query
+            code_box.update(urllib.parse.parse_qs(q))
+            self.send_response(200); self.end_headers()
+            self.wfile.write(b"<h2>ytscout authorized. You can close this tab.</h2>")
+        def log_message(self, *a):
+            pass
+    redirect = f"http://localhost:{OAUTH_PORT}"
+    auth_url = ("https://accounts.google.com/o/oauth2/v2/auth?" + urllib.parse.urlencode({
+        "client_id": client["id"], "redirect_uri": redirect, "response_type": "code",
+        "scope": SCOPES, "access_type": "offline", "prompt": "consent"}))
+    print(f"\n  Opening your browser to approve… if it doesn't open, paste this:\n  {auth_url}\n")
+    webbrowser.open(auth_url)
+    with socketserver.TCPServer(("localhost", OAUTH_PORT), H) as srv:
+        srv.handle_request()  # serve exactly one redirect
+    code = (code_box.get("code") or [None])[0]
+    if not code:
+        print("  ! No auth code received. Try again."); return False
+    tok = _curl_json("https://oauth2.googleapis.com/token", data=urllib.parse.urlencode({
+        "code": code, "client_id": client["id"], "client_secret": client["secret"],
+        "redirect_uri": redirect, "grant_type": "authorization_code"}))
+    if "refresh_token" not in tok:
+        print(f"  ! Token exchange failed: {tok}"); return False
+    os.makedirs(OAUTH_DIR, exist_ok=True)
+    json.dump(tok, open(os.path.join(OAUTH_DIR, "token.json"), "w"))
+    print("  ✓ Authorized. Token saved. Now run:  scout mine\n")
+    return True
+
+def _access_token(client):
+    import urllib.parse
+    tp = os.path.join(OAUTH_DIR, "token.json")
+    if not os.path.exists(tp):
+        return None
+    rt = json.load(open(tp)).get("refresh_token")
+    fresh = _curl_json("https://oauth2.googleapis.com/token", data=urllib.parse.urlencode({
+        "client_id": client["id"], "client_secret": client["secret"],
+        "refresh_token": rt, "grant_type": "refresh_token"}))
+    return fresh.get("access_token")
+
+def cmd_mine(args):
+    client = _load_client()
+    if not client or args.setup:
+        _mine_setup_msg(); return
+    if args.auth:
+        _oauth_flow(client); return
+    tok = _access_token(client)
+    if not tok:
+        print("\n  Not authorized yet. Run:  scout mine --auth   (or  scout mine --setup  for the steps)\n"); return
+    hdr = {"Authorization": f"Bearer {tok}"}
+    # resolve the channel
+    ch = _curl_json("https://www.googleapis.com/youtube/v3/channels?part=snippet,statistics&mine=true", headers=hdr)
+    if ch.get("error") or not ch.get("items"):
+        print(f"\n  ! Could not read your channel: {ch.get('error', ch)}\n"); return
+    c0 = ch["items"][0]
+    name = c0["snippet"]["title"]
+    subs = c0["statistics"].get("subscriberCount", "?")
+    # analytics: last 28 days
+    end = time.strftime("%Y-%m-%d")
+    start = time.strftime("%Y-%m-%d", time.localtime(time.time() - args.days * 86400))
+    metrics = "views,estimatedMinutesWatched,averageViewDuration,averageViewPercentage,subscribersGained,estimatedRevenue"
+    a = _curl_json(f"https://youtubeanalytics.googleapis.com/v2/reports?ids=channel==MINE"
+                   f"&startDate={start}&endDate={end}&metrics={metrics}", headers=hdr)
+    print(f"\n\033[1mYOUR CHANNEL — private metrics (last {args.days} days)\033[0m  {name} ({subs} subs)\n")
+    if a.get("error"):
+        print(f"  ! Analytics API said: {a['error'].get('message', a['error'])}")
+        print("  (If it mentions the API being disabled, enable 'YouTube Analytics API' in your Cloud project.)\n"); return
+    cols = [h["name"] for h in a.get("columnHeaders", [])]
+    row = (a.get("rows") or [[]])[0]
+    d = dict(zip(cols, row))
+    def g(k):
+        return d.get(k, "?")
+    print(f"  Views: {g('views')}   |   Watch time: {g('estimatedMinutesWatched')} min")
+    avd = g('averageViewDuration')
+    print(f"  Avg view duration: {avd if avd=='?' else str(int(avd))+'s'}   |   Avg % viewed: {g('averageViewPercentage')}%")
+    print(f"  Subscribers gained: {g('subscribersGained')}")
+    print(f"  \033[1mEstimated revenue: ${g('estimatedRevenue')}\033[0m  \033[2m(REAL, from your Studio — not a niche guess)\033[0m")
+    print(f"\n  This is the data Reggie said no free tool could see. Now it can — because it's YOUR data, with YOUR permission.\n")
+
+def cmd_config(args):
+    cfg = os.path.expanduser("~/ytscout/rpm.json")
+    data = json.load(open(cfg)) if os.path.exists(cfg) else {}
+    if args.rpm is not None:
+        key = args.niche or "default"
+        data[key] = args.rpm
+        json.dump(data, open(cfg, "w"), indent=2)
+        print(f"\n  Saved your real RPM: {key} = ${args.rpm}/1000 views.")
+        print("  This now overrides the niche guess in outliers/audit/weekly. (Find yours in YouTube Studio > Analytics > Revenue > RPM.)\n")
+    else:
+        print(f"\n  Your saved RPMs ({cfg}):")
+        if data:
+            for k, v in data.items():
+                print(f"   • {k}: ${v}/1000")
+        else:
+            print("   (none — set with: scout config --rpm 6.2 [--niche ai])")
+        print()
+
+# ---------- CLI ----------
+
+def main():
+    p = argparse.ArgumentParser(prog="scout", description="Free local vidIQ/TubeBuddy, grounded in the consensus doctrine.")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    o = sub.add_parser("outliers", help="find proven video ideas by view-to-subscriber ratio")
+    o.add_argument("handle")
+    o.add_argument("--vs", default="", help="comma-separated comparable-niche handles to hunt across")
+    o.add_argument("--min-views", type=int, default=1000)
+    o.add_argument("--scan", type=int, default=30, help="recent videos to scan per channel (default 30)")
+    o.add_argument("--niche", default=None, help="niche for RPM/revenue: ai, tech, business, finance, family, homeschool, education, lifestyle, gaming...")
+    o.add_argument("--rpm", type=float, default=None, help="your real RPM (overrides niche guess)")
+    o.add_argument("--top", type=int, default=20)
+    o.add_argument("--ai", action="store_true", help="use gemma to port the top outlier into your niches")
+    o.add_argument("--html", action="store_true")
+    o.set_defaults(func=cmd_outliers)
+
+    f = sub.add_parser("feed", help="render your title+thumbnail among REAL niche videos (thumbsup.tv-style)")
+    f.add_argument("query", help="the niche/search to build the feed from")
+    f.add_argument("--my-title", default="", help="your proposed title")
+    f.add_argument("--my-thumb", default="", help="path to your proposed thumbnail image")
+    f.add_argument("--pos", type=int, default=3, help="where to place your card (0-based)")
+    f.add_argument("--n", type=int, default=11, help="real videos to surround it with")
+    f.add_argument("--open", action="store_true", help="open the HTML when done")
+    f.set_defaults(func=cmd_feed)
+
+    w = sub.add_parser("weekly", help="scan your watchlist for new outliers (zero AI, schedulable)")
+    w.add_argument("--scan", type=int, default=15, help="recent videos per channel (default 15)")
+    w.add_argument("--min-views", type=int, default=1000)
+    w.add_argument("--niche", default=None, help="override the watchlist niche for RPM")
+    w.add_argument("--rpm", type=float, default=None, help="your real RPM (overrides niche guess)")
+    w.add_argument("--list", default=None, help="which watchlist to scan (default: active)")
+    w.add_argument("--top", type=int, default=25)
+    w.set_defaults(func=cmd_weekly)
+
+    wa = sub.add_parser("watch", help="manage watchlists of comparable channels (one per channel/niche)")
+    wa.add_argument("--list", default=None, help="which named list to edit (e.g. ai, homeschool)")
+    wa.add_argument("--add", default="", help="comma-separated handles to add")
+    wa.add_argument("--remove", default="", help="a handle to remove")
+    wa.add_argument("--niche", default=None, help="set the list's niche (for RPM)")
+    wa.add_argument("--activate", action="store_true", help="make this the active list weekly scans")
+    wa.set_defaults(func=cmd_watch)
+
+    t = sub.add_parser("title", help="score a proposed title against the data-study rules")
+    t.add_argument("text")
+    t.add_argument("--ai", action="store_true", help="gemma generates 5 stronger variants")
+    t.set_defaults(func=cmd_title)
+
+    n = sub.add_parser("niche", help="see what ranks for a search term and how saturated it is")
+    n.add_argument("query")
+    n.add_argument("--n", type=int, default=25)
+    n.add_argument("--html", action="store_true")
+    n.set_defaults(func=cmd_niche)
+
+    a = sub.add_parser("audit", help="audit a channel's public packaging/length/consistency + revenue")
+    a.add_argument("handle")
+    a.add_argument("--niche", default=None, help="niche for RPM/revenue estimate")
+    a.add_argument("--rpm", type=float, default=None, help="your real RPM (overrides niche guess)")
+    a.add_argument("--html", action="store_true")
+    a.set_defaults(func=cmd_audit)
+
+    cf = sub.add_parser("config", help="save your real RPM (from YouTube Studio) so estimates use YOUR number")
+    cf.add_argument("--rpm", type=float, default=None, help="your $ per 1000 views")
+    cf.add_argument("--niche", default=None, help="which niche/channel this RPM is for (else 'default')")
+    cf.set_defaults(func=cmd_config)
+
+    m = sub.add_parser("mine", help="YOUR channel's private CTR/retention/real revenue (one-time Google auth)")
+    m.add_argument("--setup", action="store_true", help="show the one-time setup steps")
+    m.add_argument("--auth", action="store_true", help="authorize (opens browser once)")
+    m.add_argument("--days", type=int, default=28, help="lookback window (default 28)")
+    m.set_defaults(func=cmd_mine)
+
+    args = p.parse_args()
+    args.func(args)
+
+if __name__ == "__main__":
+    main()

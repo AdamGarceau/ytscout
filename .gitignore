@@ -1,0 +1,19 @@
+# NOTE: gitignore does not support trailing comments on a pattern line.
+# Every comment must sit on its own line or the pattern silently stops matching.
+
+# Secrets. Never commit these.
+# scout.py writes the Google OAuth client secret + refresh token here (see OAUTH_DIR).
+.oauth/
+
+# Personal data. This repo is meant to go public with the video.
+# Your real RPM from YouTube Studio.
+rpm.json
+# The channels you track.
+watchlist.json
+# Generated reports + dashboard. They contain your channel data.
+reports/
+
+# Generated / disposable
+.cache/
+__pycache__/
+*.pyc
