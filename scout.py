@@ -527,6 +527,314 @@ header{{padding:14px 20px;font-size:15px;color:var(--sub);border-bottom:1px soli
     if args.open:
         os.system(f"open '{path}' 2>/dev/null")
 
+# ---------- Command: studio (visual GUI: title+thumb vs live YouTube + audience panel) ----------
+
+# The 5-persona ICP panel WITH human flaws — the channel's own doctrine (a panel that
+# flatters is useless). Ported from the content-engine synth_titles.py so studio is self-contained.
+STUDIO_PANEL = """You are simulating 5 real YouTube viewers scrolling their feed. They are NOT eager or polite —
+they are skeptical, distracted, and have seen a thousand thumbnails today. Each has flaws:
+
+1) NEVER-STARTED NORA: 34, marketing job, wants to build an app but is intimidated. Burned by 3 coding
+   courses she never finished. Skeptical of "no code" hype — thinks it's usually a lie. Tired tonight.
+2) INDIE HACKER IKE: 27, already vibe-codes with Cursor. Allergic to clickbait and "I can't code" framing
+   (thinks it's fake-humble bait). Will click only if it promises something he doesn't already know.
+3) CREATOR CARLA: 41, YouTuber/marketer, time-poor, half-watching while doing dishes. Clicks practical
+   "I built X" proof, ignores mindset fluff. Cynical about "gurus."
+4) CURIOUS CARL: 52, uses ChatGPT casually, curious about building but worried it's a scam or too hard.
+   Low trust. Needs to feel it's honest and for a normal person.
+5) SCROLLER SAM: 19, doom-scrolling, 1.5-second attention, seen everything. Only a real hook or a number
+   stops him. Everything reads as "content" to him.
+
+For the item below, each persona gives an honest click-likelihood 1-10 (1=scroll past, 10=must click)
+and a one-line reason IN CHARACTER (include their skepticism). Return ONLY valid JSON:
+{{"nora":{{"s":N,"why":"..."}},"ike":{{"s":N,"why":"..."}},"carla":{{"s":N,"why":"..."}},"carl":{{"s":N,"why":"..."}},"sam":{{"s":N,"why":"..."}}}}
+
+ITEM ({kind}): {item}
+"""
+_PERSONAS = ("nora", "ike", "carla", "carl", "sam")
+_PERSONA_NAMES = {"nora": "Never-started Nora", "ike": "Indie-hacker Ike", "carla": "Creator Carla",
+                  "carl": "Curious Carl", "sam": "Scroller Sam"}
+
+def _panel_score(kind, item):
+    """One gemma call scoring a title/thumbnail across the 5 flawed personas. Local, free."""
+    body = json.dumps({"model": "gemma4:12b", "prompt": STUDIO_PANEL.format(kind=kind, item=item),
+        "stream": False, "think": False, "format": "json",
+        "options": {"num_ctx": 4096, "temperature": 0.6}}).encode()
+    req = urllib.request.Request(OLLAMA_URL, data=body, headers={"Content-Type": "application/json"})
+    try:
+        raw = json.loads(urllib.request.urlopen(req, timeout=120).read())["response"]
+        d = json.loads(raw)
+        scores = [d[p]["s"] for p in _PERSONAS if p in d and isinstance(d[p].get("s"), (int, float))]
+        if not scores:
+            return {"error": "panel returned no scores"}
+        return {"mean": round(statistics.mean(scores), 1), "low": min(scores), "panel": d}
+    except urllib.error.URLError:
+        return {"error": "ollama not reachable — is it running? (the YouTube preview works without it)"}
+    except Exception as e:
+        return {"error": str(e)}
+
+def _studio_niche_default():
+    try:
+        data = load_watchlist()
+        active = _active_list(data)
+        return (active or {}).get("niche") or "ai"
+    except Exception:
+        return "ai"
+
+def _studio_preview(data):
+    """Zero-AI: real niche videos + your card. Same engine as `scout feed`, no model call."""
+    niche = (data.get("niche") or "ai").strip() or "ai"
+    n = max(4, min(20, int(data.get("n", 11))))
+    d = search_dump(niche, n)
+    if d.get("error"):
+        return {"error": d["error"], "cards": []}
+    vids = [v for v in d["results"] if v["dur"] > SHORT_MAX_SEC][:n]
+    cards = [{"title": v["title"], "channel": v["channel"], "views": _yt_views(v["views"]),
+              "thumb": f"https://i.ytimg.com/vi/{v['id']}/hqdefault.jpg", "mine": False} for v in vids]
+    return {"cards": cards, "niche": niche}
+
+def _studio_panel(data):
+    """Runs each title (and optional thumbnail description) through the flawed ICP panel."""
+    titles = [t.strip() for t in (data.get("titles") or []) if t and t.strip()]
+    thumb_desc = (data.get("thumb_desc") or "").strip()
+    results, errors = [], []
+    for t in titles:
+        r = _panel_score("video title", t)
+        if "error" in r:
+            errors.append({"txt": t, "error": r["error"]})
+        else:
+            r["txt"] = t; r["kind"] = "title"; results.append(r)
+    if thumb_desc:
+        r = _panel_score("thumbnail concept", thumb_desc)
+        if "error" in r:
+            errors.append({"txt": thumb_desc, "error": r["error"]})
+        else:
+            r["txt"] = thumb_desc; r["kind"] = "thumbnail"; results.append(r)
+    results.sort(key=lambda x: x["mean"], reverse=True)
+    return {"results": results, "errors": errors, "persona_names": _PERSONA_NAMES}
+
+STUDIO_HTML = r"""<!doctype html><html><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>ytscout studio — packaging test</title>
+<style>
+:root{--bg:#0f0f0f;--panel:#1c1c1c;--fg:#f1f1f1;--sub:#aaa;--line:#333;--blue:#3ea6ff;--good:#2ecc71;--warn:#e0a800}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 Roboto,-apple-system,system-ui,sans-serif}
+header{padding:12px 18px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px}
+header b{font-size:16px}header .tag{color:var(--sub);font-size:13px}
+.wrap{display:grid;grid-template-columns:340px 1fr;gap:0;height:calc(100vh - 49px)}
+.side{border-right:1px solid var(--line);padding:16px;overflow:auto;background:var(--panel)}
+.main{overflow:auto;padding:0}
+label{display:block;font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:var(--sub);margin:14px 0 6px}
+input[type=text],textarea{width:100%;background:#0f0f0f;border:1px solid var(--line);color:var(--fg);
+  border-radius:8px;padding:9px 10px;font:14px Roboto,sans-serif;resize:vertical}
+textarea{min-height:96px}
+.hint{color:var(--sub);font-size:12px;margin-top:4px}
+button{cursor:pointer;border:0;border-radius:8px;padding:10px 12px;font-weight:600;font-size:14px;width:100%;margin-top:10px}
+.b-primary{background:var(--blue);color:#001}
+.b-ghost{background:#2a2a2a;color:var(--fg)}
+.thumbdrop{margin-top:6px;border:1px dashed var(--line);border-radius:8px;padding:10px;text-align:center;color:var(--sub);font-size:13px;cursor:pointer}
+.thumbdrop img{max-width:100%;border-radius:6px;display:block;margin:0 auto}
+.titlelist{margin-top:6px}
+.titlerow{display:flex;align-items:center;gap:8px;margin:6px 0}
+.titlerow input{flex:1}
+.titlerow .pick{width:26px;height:26px;border-radius:50%;border:2px solid var(--line);flex:0 0 auto;cursor:pointer;background:transparent}
+.titlerow.sel .pick{border-color:var(--blue);background:var(--blue)}
+.titlerow .del{width:26px;flex:0 0 auto;background:#2a2a2a;border-radius:6px;padding:4px 0}
+/* feed grid — YouTube authentic */
+.feedhdr{padding:12px 20px;color:var(--sub);font-size:14px;border-bottom:1px solid var(--line)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px 12px;padding:20px}
+.card{position:relative}
+.thumb{width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:12px;display:block;background:#333}
+.thumb.ph{display:flex;align-items:center;justify-content:center;text-align:center;padding:8px;color:#ddd;
+  background:linear-gradient(135deg,#3a3a3a,#555);font-weight:600}
+.meta{padding:10px 2px}
+.ctitle{font-weight:600;font-size:15px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.csub{color:var(--sub);font-size:13px;margin-top:3px}
+.mine .thumb{outline:3px solid var(--blue);outline-offset:2px}
+.badge{position:absolute;top:8px;left:8px;background:var(--blue);color:#001;font-weight:700;font-size:11px;padding:2px 7px;border-radius:4px;letter-spacing:.5px}
+/* audience panel */
+.panelwrap{border-top:1px solid var(--line);padding:16px 20px}
+.panelwrap h3{margin:0 0 4px;font-size:15px}
+.panelwrap .note{color:var(--sub);font-size:12px;margin-bottom:12px}
+.scorerow{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid #262626}
+.scorenum{font-size:22px;font-weight:800;width:52px;text-align:center;border-radius:8px;padding:6px 0;flex:0 0 auto}
+.scoretxt{flex:1}.scoretxt .t{font-weight:600}.scoretxt .why{color:var(--sub);font-size:12px;margin-top:3px}
+.kind{font-size:11px;color:var(--sub);text-transform:uppercase;letter-spacing:.5px}
+.muted{color:var(--sub)}.err{color:#ff6b6b;font-size:13px}
+.spin{display:inline-block;width:14px;height:14px;border:2px solid var(--line);border-top-color:var(--blue);border-radius:50%;animation:s .7s linear infinite;vertical-align:-2px}
+@keyframes s{to{transform:rotate(360deg)}}
+</style></head><body>
+<header><b>ytscout studio</b><span class=tag>packaging test · your title + thumbnail vs the real feed, then the audience</span></header>
+<div class=wrap>
+  <div class=side>
+    <label>Niche feed to test against</label>
+    <input id=niche type=text value="__NICHE__">
+    <div class=hint>The real videos your card competes with in the scroll.</div>
+
+    <label>Your title options</label>
+    <div class=titlelist id=titles></div>
+    <button class=b-ghost id=addtitle>+ add another title</button>
+
+    <label>Your thumbnail</label>
+    <div class=thumbdrop id=thumbdrop>click to upload an image</div>
+    <input id=thumbfile type=file accept="image/*" style=display:none>
+    <label>Thumbnail idea (for the audience panel, optional)</label>
+    <textarea id=thumbdesc placeholder="e.g. split screen: 'vidIQ $40/mo' with a red X vs a terminal at '$0', my face closed-mouth"></textarea>
+
+    <button class=b-primary id=preview>Preview in YouTube ▸</button>
+    <button class=b-ghost id=testpanel>Test with audience (local AI)</button>
+    <div class=hint id=status></div>
+  </div>
+  <div class=main>
+    <div class=feedhdr id=feedhdr>Type titles, upload a thumbnail, then hit <b>Preview in YouTube</b>. Your card is outlined in blue.</div>
+    <div class=grid id=grid></div>
+    <div class=panelwrap id=panelwrap style=display:none>
+      <h3>Audience panel</h3>
+      <div class=note>5 skeptical viewers with human flaws score click-likelihood 1–10. Read the ranking, not the absolute number — this panel is harsh by design. The real test is A/B on your channel.</div>
+      <div id=scores></div>
+    </div>
+  </div>
+</div>
+<script>
+let realCards=[], myThumb=null, selIdx=0;
+const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
+const seed=["I Replaced a $40/Month App in One Afternoon",""];
+
+function renderTitleRows(){
+  const box=$('#titles'); box.innerHTML='';
+  seed.forEach((t,i)=>{
+    const row=document.createElement('div'); row.className='titlerow'+(i===selIdx?' sel':'');
+    row.innerHTML=`<button class=pick title="show this one on the preview card"></button>
+      <input type=text value="${t.replace(/"/g,'&quot;')}" placeholder="title option ${i+1}">
+      <button class=del title=remove>✕</button>`;
+    row.querySelector('.pick').onclick=()=>{selIdx=i; renderTitleRows(); drawGrid();};
+    row.querySelector('input').oninput=e=>{seed[i]=e.target.value; if(i===selIdx) drawGrid();};
+    row.querySelector('.del').onclick=()=>{if(seed.length>1){seed.splice(i,1); if(selIdx>=seed.length)selIdx=0; renderTitleRows(); drawGrid();}};
+    box.appendChild(row);
+  });
+}
+$('#addtitle').onclick=()=>{seed.push(''); renderTitleRows();};
+
+$('#thumbdrop').onclick=()=>$('#thumbfile').click();
+$('#thumbfile').onchange=e=>{
+  const f=e.target.files[0]; if(!f)return;
+  const r=new FileReader(); r.onload=()=>{myThumb=r.result; $('#thumbdrop').innerHTML=`<img src="${myThumb}">`; drawGrid();}; r.readAsDataURL(f);
+};
+
+function card(c){
+  const cls='card'+(c.mine?' mine':'');
+  const thumb=c.thumb?`<img class=thumb src="${c.thumb}">`:`<div class="thumb ph">${(c.title||'').slice(0,40)}</div>`;
+  const badge=c.mine?'<span class=badge>YOU</span>':'';
+  return `<div class="${cls}">${thumb}${badge}<div class=meta><div class=ctitle>${esc(c.title)}</div><div class=csub>${esc(c.channel)} · ${c.views}</div></div></div>`;
+}
+function esc(s){const d=document.createElement('div'); d.textContent=s||''; return d.innerHTML;}
+
+function drawGrid(){
+  if(!realCards.length)return;
+  const mine={title:seed[selIdx]||'[your proposed title here]',channel:'Your Channel',views:'NEW',thumb:myThumb,mine:true};
+  const pos=Math.min(3, realCards.length);
+  const all=[...realCards.slice(0,pos), mine, ...realCards.slice(pos)];
+  $('#grid').innerHTML=all.map(card).join('');
+  $('#feedhdr').innerHTML=`Real <b>${esc($('#niche').value)}</b> feed · your card is outlined in blue. Does your packaging stop the scroll?`;
+}
+
+async function preview(){
+  status('fetching the real feed…',true);
+  try{
+    const r=await fetch('/api/preview',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({niche:$('#niche').value, n:11})});
+    const d=await r.json();
+    if(d.error){status('⚠ '+d.error);return;}
+    realCards=d.cards; drawGrid(); status('');
+  }catch(e){status('⚠ '+e);}
+}
+async function testpanel(){
+  const titles=seed.map(s=>s.trim()).filter(Boolean);
+  const thumb_desc=$('#thumbdesc').value.trim();
+  if(!titles.length && !thumb_desc){status('add at least one title or a thumbnail idea first');return;}
+  $('#panelwrap').style.display='block';
+  $('#scores').innerHTML='<div class=muted><span class=spin></span> the panel is scoring… (local AI, ~10s each)</div>';
+  status('running the audience panel…',true);
+  try{
+    const r=await fetch('/api/panel',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({titles, thumb_desc})});
+    const d=await r.json(); renderScores(d); status('');
+  }catch(e){$('#scores').innerHTML='<div class=err>⚠ '+e+'</div>'; status('');}
+}
+function color(n){return n>=6?'var(--good)':n>=4?'var(--warn)':'#c0392b';}
+function renderScores(d){
+  let h='';
+  (d.results||[]).forEach(r=>{
+    const names=d.persona_names||{};
+    const worst=Object.entries(r.panel).filter(([k,v])=>v&&typeof v.s==='number').sort((a,b)=>a[1].s-b[1].s)[0];
+    const worstline=worst?`${names[worst[0]]||worst[0]} (${worst[1].s}): "${esc(worst[1].why)}"`:'';
+    h+=`<div class=scorerow>
+      <div class=scorenum style="background:${color(r.mean)}22;color:${color(r.mean)}">${r.mean}</div>
+      <div class=scoretxt><div class=kind>${r.kind}</div><div class=t>${esc(r.txt)}</div>
+        <div class=why>harshest: ${worstline} · low ${r.low}</div></div></div>`;
+  });
+  (d.errors||[]).forEach(e=>{h+=`<div class=scorerow><div class=err>⚠ ${esc(e.txt)} — ${esc(e.error)}</div></div>`;});
+  $('#scores').innerHTML=h||'<div class=muted>no scores returned</div>';
+}
+function status(t,busy){$('#status').innerHTML=(busy?'<span class=spin></span> ':'')+esc(t);}
+
+$('#preview').onclick=preview;
+$('#testpanel').onclick=testpanel;
+renderTitleRows();
+</script></body></html>"""
+
+def cmd_studio(args):
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    import threading, webbrowser
+    niche_default = args.niche or _studio_niche_default()
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+        def _send(self, code, ctype, body):
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        def do_GET(self):
+            if self.path in ("/", "/index.html"):
+                self._send(200, "text/html; charset=utf-8",
+                           STUDIO_HTML.replace("__NICHE__", html.escape(niche_default)).encode())
+            else:
+                self._send(404, "text/plain", b"not found")
+        def do_POST(self):
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                payload = json.loads(self.rfile.read(length) or b"{}")
+            except Exception:
+                self._send(400, "application/json", b'{"error":"bad request"}'); return
+            if self.path == "/api/preview":
+                out = _studio_preview(payload)
+            elif self.path == "/api/panel":
+                out = _studio_panel(payload)
+            else:
+                self._send(404, "text/plain", b"not found"); return
+            self._send(200, "application/json", json.dumps(out).encode())
+
+    port = args.port
+    try:
+        srv = HTTPServer(("127.0.0.1", port), Handler)
+    except OSError as e:
+        print(f"  ! port {port} busy ({e}). Try: scout studio --port {port+1}"); return
+    url = f"http://127.0.0.1:{port}/"
+    print(f"\n  \033[1mytscout studio\033[0m → {url}")
+    print(f"  Niche: {niche_default}. Preview is zero-AI; the audience panel uses local gemma.")
+    print(f"  Ctrl-C to stop.\n")
+    if not args.no_open:
+        threading.Timer(0.6, lambda: webbrowser.open(url)).start()
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        print("\n  studio stopped.")
+        srv.server_close()
+
 # ---------- Command: weekly (the automatable idea-farm ritual, zero AI) ----------
 
 def load_watchlist():
@@ -808,6 +1116,12 @@ def main():
     f.add_argument("--n", type=int, default=11, help="real videos to surround it with")
     f.add_argument("--open", action="store_true", help="open the HTML when done")
     f.set_defaults(func=cmd_feed)
+
+    st = sub.add_parser("studio", help="visual GUI: test title+thumbnail against the live feed AND the audience panel")
+    st.add_argument("--niche", default=None, help="niche feed to test against (default: your active watchlist niche)")
+    st.add_argument("--port", type=int, default=8756, help="local port (default 8756)")
+    st.add_argument("--no-open", action="store_true", help="don't auto-open the browser")
+    st.set_defaults(func=cmd_studio)
 
     w = sub.add_parser("weekly", help="scan your watchlist for new outliers (zero AI, schedulable)")
     w.add_argument("--scan", type=int, default=15, help="recent videos per channel (default 15)")
