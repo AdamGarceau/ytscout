@@ -633,8 +633,10 @@ textarea{min-height:96px}
 button{cursor:pointer;border:0;border-radius:8px;padding:10px 12px;font-weight:600;font-size:14px;width:100%;margin-top:10px}
 .b-primary{background:var(--blue);color:#001}
 .b-ghost{background:#2a2a2a;color:var(--fg)}
-.thumbdrop{margin-top:6px;border:1px dashed var(--line);border-radius:8px;padding:10px;text-align:center;color:var(--sub);font-size:13px;cursor:pointer}
-.thumbdrop img{max-width:100%;border-radius:6px;display:block;margin:0 auto}
+.thumbdrop{display:block;margin-top:6px;border:1px dashed var(--line);border-radius:8px;padding:14px 10px;text-align:center;color:var(--sub);font-size:13px;cursor:pointer;text-transform:none;letter-spacing:normal}
+.thumbdrop:hover{border-color:var(--blue);color:var(--fg)}
+.thumbdrop.dragover{border-color:var(--blue);background:#3ea6ff22}
+.thumbdrop img{max-width:100%;border-radius:6px;display:block;margin:6px auto 0}
 .titlelist{margin-top:6px}
 .titlerow{display:flex;align-items:center;gap:8px;margin:6px 0}
 .titlerow input{flex:1}
@@ -677,7 +679,7 @@ button{cursor:pointer;border:0;border-radius:8px;padding:10px 12px;font-weight:6
     <button class=b-ghost id=addtitle>+ add another title</button>
 
     <label>Your thumbnail</label>
-    <div class=thumbdrop id=thumbdrop>click to upload an image</div>
+    <label class=thumbdrop id=thumbdrop for=thumbfile><span id=thumbtext>click to upload an image (or drag one in)</span><img id=thumbprev style=display:none></label>
     <input id=thumbfile type=file accept="image/*" style=display:none>
     <label>Thumbnail idea (for the audience panel, optional)</label>
     <textarea id=thumbdesc placeholder="e.g. split screen: 'vidIQ $40/mo' with a red X vs a terminal at '$0', my face closed-mouth"></textarea>
@@ -716,11 +718,17 @@ function renderTitleRows(){
 }
 $('#addtitle').onclick=()=>{seed.push(''); renderTitleRows();};
 
-$('#thumbdrop').onclick=()=>$('#thumbfile').click();
-$('#thumbfile').onchange=e=>{
-  const f=e.target.files[0]; if(!f)return;
-  const r=new FileReader(); r.onload=()=>{myThumb=r.result; $('#thumbdrop').innerHTML=`<img src="${myThumb}">`; drawGrid();}; r.readAsDataURL(f);
-};
+function loadThumb(f){ if(!f)return;
+  const r=new FileReader();
+  r.onload=()=>{myThumb=r.result; const p=$('#thumbprev'); p.src=myThumb; p.style.display='block';
+    $('#thumbtext').textContent='thumbnail loaded — click to replace'; drawGrid();};
+  r.readAsDataURL(f);
+}
+$('#thumbfile').onchange=e=>loadThumb(e.target.files[0]);
+const _dd=$('#thumbdrop');
+['dragover','dragenter'].forEach(ev=>_dd.addEventListener(ev,e=>{e.preventDefault();_dd.classList.add('dragover');}));
+['dragleave','drop'].forEach(ev=>_dd.addEventListener(ev,e=>{e.preventDefault();_dd.classList.remove('dragover');}));
+_dd.addEventListener('drop',e=>{const f=e.dataTransfer.files[0]; if(f&&f.type.startsWith('image/')) loadThumb(f);});
 
 function card(c){
   const cls='card'+(c.mine?' mine':'');
