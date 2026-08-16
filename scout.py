@@ -1306,6 +1306,293 @@ def _dash_collect(report_dir=None, wl=None):
         payload["seen_count"] = 0
     return payload
 
+_DASH_LINK_RE = re.compile(
+    r"^https://(youtu\.be/[A-Za-z0-9_-]{6,20}|www\.youtube\.com/watch\?v=[A-Za-z0-9_-]{6,20})$")
+
+def _dash_href(link):
+    """Strict allowlist: only a real youtu.be/watch link is ever rendered as an anchor."""
+    if link and _DASH_LINK_RE.match(link):
+        return link
+    return None
+
+def _dash_esc(v):
+    """html.escape plus an extra pass that neutralizes bare 'word=' attribute-look-alike
+    sequences in third-party text, so a hostile title/channel string can never read back
+    as an attribute-injection pattern even as inert escaped text."""
+    s = html.escape(str(v if v is not None else ""), quote=True)
+    return s.replace("=", "&#61;")
+
+def _dash_title_html(row):
+    href = _dash_href(row.get("link"))
+    t = _dash_esc(row.get("title") or "(untitled)")
+    if href:
+        return f'<a class="v" href="{_dash_esc(href)}">{t}</a>'
+    return f'<span class="v">{t}</span>'
+
+def _dash_outlier_rows_html(rows):
+    if not rows:
+        return ('<tr><td class="empty" colspan="7">No outliers in the latest run. '
+                'Run scout weekly to fill this in.</td></tr>')
+    out = []
+    for i, r in enumerate(rows):
+        cls = ' class="alt"' if i % 2 == 1 else ""
+        flag = '<span class="flag">NEW</span>' if r.get("new") else ""
+        vsub = _dash_esc(r.get("vsub") or "n/a")
+        vsmed = _dash_esc(r.get("vsmed") or "n/a")
+        views = _dash_esc(r.get("views") or "n/a")
+        est = _dash_esc(r.get("est") or "n/a")
+        channel = f'<span class="v">{_dash_esc(r.get("channel") or "")}</span>'
+        title = _dash_title_html(r)
+        out.append(
+            f"<tr{cls}><td>{flag}</td><td class=\"num\">{vsub}</td><td class=\"num\">{vsmed}</td>"
+            f"<td class=\"num\">{views}</td><td class=\"num\">{est}</td><td>{channel}</td><td>{title}</td></tr>"
+        )
+    return "\n".join(out)
+
+def _dash_trend_svg(trend):
+    if not trend:
+        return '<p class="empty">No runs on disk yet. Run scout weekly to start the trend.</p>'
+    n = len(trend)
+    bar_h = 140
+    label_h = 24
+    svg_h = bar_h + label_h
+    w = max(360, n * 70)
+    gap = 16.0
+    bar_w = (w - gap * (n - 1)) / n if n > 1 else float(w)
+    max_new = max((t.get("new") or 0) for t in trend) or 1
+    parts = []
+    for i, t in enumerate(trend):
+        x = i * (bar_w + gap)
+        newc = t.get("new") or 0
+        bh = 2 if newc == 0 else max(4, round(bar_h * newc / max_new))
+        y = bar_h - bh
+        fill = "#D9541E" if i == n - 1 else "#EFE9E0"
+        op = "" if i == n - 1 else ' opacity="0.45"'
+        parts.append(f'<rect x="{x:.1f}" y="{y}" width="{bar_w:.1f}" height="{bh}" fill="{fill}"{op}></rect>')
+        date = t.get("date") or ""
+        mmdd = date[5:] if len(date) >= 10 else date
+        lx = x + bar_w / 2
+        parts.append(
+            f'<text x="{lx:.1f}" y="{bar_h + 16}" font-size="11" fill="#EFE9E0" text-anchor="middle" '
+            f'font-family="SF Mono, Menlo, ui-monospace, monospace">{_dash_esc(mmdd)}</text>'
+        )
+    bars = "\n".join(parts)
+    return f'<svg viewBox="0 0 {w} {svg_h}" width="100%" height="{svg_h}" role="img" aria-label="run over run new outlier trend">{bars}</svg>'
+
+_DASH_CSS = """
+:root {
+  --ground:#F7F4EF; --ink:#1A1815; --muted:#6E675C; --hairline:#E3DDD2;
+  --dark-bg:#161310; --dark-ink:#EFE9E0; --ember:#D9541E;
+  --font-display:"Iowan Old Style", Charter, Palatino, Georgia, serif;
+  --font-body:-apple-system, "Avenir Next", "Helvetica Neue", sans-serif;
+  --font-data:"SF Mono", Menlo, ui-monospace, monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin:0; padding:0; background:var(--ground); color:var(--ink); }
+body { font-family:var(--font-body); font-size:15px; line-height:1.55; }
+.wrap { max-width:1180px; margin:0 auto; padding:96px 32px 56px; }
+.page-head { margin-bottom:56px; }
+.eyebrow, .label { font-family:var(--font-data); font-size:11px; text-transform:uppercase; letter-spacing:.12em; color:var(--muted); margin:0 0 10px; }
+h1 { font-family:var(--font-display); font-weight:700; font-size:34px; line-height:1.2; letter-spacing:-0.02em; margin:0 0 18px; text-wrap: balance; }
+h2 { font-family:var(--font-display); font-weight:600; font-size:19px; line-height:1.2; letter-spacing:-0.02em; margin:0 0 18px; text-wrap: balance; }
+p { max-width:66ch; color:var(--muted); text-wrap: pretty; margin:0; }
+.layout { display:grid; grid-template-columns: minmax(0,1fr) 300px; gap:56px; }
+@media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+.hero { margin-bottom:56px; }
+.hero-num { font-family:var(--font-display); font-weight:700; font-size:88px; line-height:1.05; letter-spacing:-0.045em; color:var(--ember); margin:0; }
+.hero-sub { font-size:15px; color:var(--ink); margin-top:10px; max-width:66ch; }
+table.outliers { width:100%; border-collapse:collapse; font-family:var(--font-data); font-size:13px; line-height:1.4; }
+table.outliers th { text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:.12em; color:var(--muted); font-weight:500; padding:10px 8px; border-bottom:1px solid var(--hairline); }
+table.outliers td { padding:10px 8px; vertical-align:top; }
+table.outliers tr.alt td { background:rgba(26,24,21,0.035); }
+table.outliers td.num, table.outliers th.num { text-align:right; }
+table.outliers td.empty { color:var(--muted); font-family:var(--font-body); padding:30px 8px; }
+.flag { color:var(--ember); font-weight:700; }
+a { color:var(--ink); text-decoration:underline; text-decoration-color:var(--hairline); }
+a:hover { color:var(--ember); }
+.darkband { position:relative; background:var(--dark-bg); color:var(--dark-ink); margin:56px calc(50% - 50vw) 0; padding:56px 32px; overflow:hidden; }
+.darkband .inner { max-width:1180px; margin:0 auto; position:relative; z-index:1; }
+.darkband h2 { color:var(--dark-ink); }
+.grain { position:absolute; inset:0; opacity:.07; pointer-events:none; }
+.trend-caption { font-family:var(--font-data); font-size:11px; color:var(--dark-ink); opacity:.7; margin-top:18px; }
+.rail > div { margin-bottom:56px; }
+.rail > div:last-child { margin-bottom:0; }
+.wl-item { margin-bottom:18px; font-size:15px; }
+.wl-item:last-child { margin-bottom:0; }
+.wl-name { font-weight:600; }
+.wl-meta { font-family:var(--font-data); font-size:13px; color:var(--muted); display:block; margin-top:4px; }
+.dot { margin-right:6px; vertical-align:middle; }
+.rpm-val { font-family:var(--font-display); font-weight:700; font-size:34px; letter-spacing:-0.02em; color:var(--ink); }
+.rpm-source { font-size:13px; color:var(--muted); margin-top:10px; }
+.lr-date { font-family:var(--font-data); font-size:19px; font-weight:600; }
+.lr-age { font-size:13px; color:var(--muted); margin-top:4px; }
+.lr-line { font-family:var(--font-data); font-size:11px; color:var(--muted); margin-top:10px; word-break:break-word; }
+.empty { color:var(--muted); font-size:15px; }
+.page-foot { margin-top:96px; padding-top:30px; border-top:1px solid var(--hairline); }
+.page-foot p { font-size:13px; color:var(--muted); max-width:66ch; }
+"""
+
+def _write_dash_html(data, path=None):
+    """Renders the whole self-contained dashboard.html from a _dash_collect payload.
+    Zero network, zero model, zero images. Writes exactly one file and returns its path."""
+    path = path or os.path.join(REPORT_DIR, "dashboard.html")
+    latest = data.get("latest")
+    latest_rows = (latest or {}).get("rows") or []
+
+    lede = (f"Assembled from the run on {_dash_esc(latest['date'])}." if latest
+            else "No weekly runs on disk yet. Run scout weekly to start one.")
+
+    if latest_rows:
+        top = latest_rows[0]
+        hero_num = f"{top.get('vsmed_n', 0.0):.2f}x"
+        hero_label = "TOP OUTLIER VS CHANNEL MEDIAN"
+        hero_sub = (f'<span class="v">{_dash_esc(top.get("channel") or "")}</span>, '
+                    f'{_dash_esc(top.get("views") or "n/a")} views')
+    else:
+        hero_num = "0"
+        hero_label = "NO OUTLIERS IN THE LATEST RUN"
+        hero_sub = "Run scout weekly to fill this in."
+
+    outlier_rows_html = _dash_outlier_rows_html(latest_rows)
+
+    trend = data.get("trend") or []
+    trend_svg = _dash_trend_svg(trend)
+    if trend:
+        total_new = sum(t.get("new") or 0 for t in trend)
+        span = f"{trend[0].get('date')} to {trend[-1].get('date')}"
+        caption = f"{len(trend)} runs, {span}, {total_new} NEW outliers total."
+    else:
+        caption = "No trend yet. Run scout weekly to start one."
+
+    lists = data.get("lists") or []
+    if lists:
+        wl_items = []
+        for l in lists:
+            dot = ('<svg class="dot" width="6" height="6" viewBox="0 0 6 6"><circle cx="3" cy="3" r="3" fill="#D9541E"></circle></svg>'
+                   if l.get("active") else "")
+            niche = _dash_esc(l.get("niche") or "no niche set")
+            wl_items.append(
+                f'<div class="wl-item">{dot}<span class="wl-name">{_dash_esc(l.get("name") or "")}</span>'
+                f'<span class="wl-meta">{l.get("count", 0)} channels, {niche} niche</span></div>'
+            )
+        wl_html = "\n".join(wl_items)
+    else:
+        wl_html = '<p class="empty">No watchlists yet. Add one with scout watch --add.</p>'
+
+    rpm = data.get("rpm") or {}
+    rpm_val = rpm.get("value")
+    rpm_html = (
+        f'<div class="rpm-val">${rpm_val:.2f}</div>'
+        f'<div class="rpm-source">Source: {_dash_esc(rpm.get("source") or "fallback default")}.</div>'
+    ) if rpm_val is not None else '<p class="empty">No RPM on record. Set one with scout config --rpm.</p>'
+
+    cron = data.get("cron") or {}
+    if cron.get("present"):
+        log_date = (time.strftime("%Y-%m-%d", time.localtime(cron["log_mtime"]))
+                    if cron.get("log_mtime") else "unknown")
+        age = cron.get("age_days")
+        if age is None:
+            age_words = "age unknown"
+        elif age <= 0:
+            age_words = "today"
+        elif age == 1:
+            age_words = "1 day ago"
+        else:
+            age_words = f"{age} days ago"
+        err_lines = cron.get("error_lines") or 0
+        last_line = cron.get("last_line") or ""
+        lastrun_html = (
+            f'<div class="lr-date">{_dash_esc(log_date)}</div>'
+            f'<div class="lr-age">{_dash_esc(age_words)}, {err_lines} error line{"s" if err_lines != 1 else ""}</div>'
+            f'<div class="lr-line"><span class="v">{_dash_esc(last_line)}</span></div>'
+        )
+    else:
+        lastrun_html = '<p class="empty">The weekly job has not written a log here yet.</p>'
+
+    gen_ts = time.strftime("%Y-%m-%d %H:%M")
+
+    html_doc = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ytscout dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>{_DASH_CSS}</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="page-head">
+    <div class="eyebrow">SCOUT</div>
+    <h1>Idea farm</h1>
+    <p>{lede}</p>
+  </header>
+
+  <div class="layout">
+    <div class="col-wide">
+      <section class="hero">
+        <div class="hero-num">{hero_num}</div>
+        <div class="label">{hero_label}</div>
+        <div class="hero-sub">{hero_sub}</div>
+      </section>
+
+      <section class="outliers-section">
+        <table class="outliers">
+          <thead>
+            <tr><th></th><th class="num">V/Sub</th><th class="num">vsMed</th><th class="num">Views</th>
+                <th class="num">Est$</th><th>Channel</th><th>Title</th></tr>
+          </thead>
+          <tbody>
+{outlier_rows_html}
+          </tbody>
+        </table>
+      </section>
+    </div>
+
+    <aside class="col-rail rail">
+      <div class="wl-block">
+        <div class="label">WATCHLISTS</div>
+        {wl_html}
+      </div>
+      <div class="rpm-block">
+        <div class="label">RPM IN USE</div>
+        {rpm_html}
+      </div>
+      <div class="lastrun-block">
+        <div class="label">LAST RUN</div>
+        {lastrun_html}
+      </div>
+    </aside>
+  </div>
+</div>
+
+<div class="darkband">
+  <div class="grain">
+    <svg width="100%" height="100%">
+      <filter id="dashgrain"><feTurbulence type="fractalNoise" baseFrequency="0.8" numOctaves="2" stitchTiles="stitch"></feTurbulence></filter>
+      <rect width="100%" height="100%" filter="url(#dashgrain)"></rect>
+    </svg>
+  </div>
+  <div class="inner">
+    <h2>Run over run</h2>
+    {trend_svg}
+    <div class="trend-caption">{caption}</div>
+  </div>
+</div>
+
+<div class="wrap">
+  <footer class="page-foot">
+    <p>Generated {gen_ts}. Assembled offline from files already on disk, no network call and no model
+    call. Thumbnails are left out on purpose so this file stays under 150KB (reports/feed.html is
+    3.1MB because it base64 embeds images).</p>
+  </footer>
+</div>
+</body>
+</html>
+"""
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(html_doc)
+    return path
+
 # ---------- Command: mine (YOUR OWN channel's private metrics via OAuth) ----------
 # Uses curl for all Google HTTPS (this Python build has broken SSL certs) + stdlib loopback
 # for the OAuth redirect. One-time setup: a Google Cloud "Desktop app" OAuth client.
