@@ -1,0 +1,10 @@
+{
+  "project": "ytscout",
+  "mode": "speed-run",
+  "build_engine": "gsd",
+  "verdict": "BUILD FOR SELF",
+  "constraints": {
+    "no_paid_apis": true,
+    "deps": "python stdlib + yt-dlp + local ollama only"
+  }
+}
