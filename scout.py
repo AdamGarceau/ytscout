@@ -10,6 +10,7 @@ Commands:
   scout title "<proposed title>" [--ai]
   scout niche "<search query>" [--n N] [--html]
   scout keywords "<seed>" [--expand none|quick|full] [--top N] [--check N] [--n N] [--html]
+  scout dash [--refresh] [--open]
   scout audit <handle> [--html]
 
 Doctrine source: ~/content-engine/strategy/youtube-consensus-doctrine.md
@@ -1593,6 +1594,39 @@ def _write_dash_html(data, path=None):
         f.write(html_doc)
     return path
 
+def cmd_dash(args):
+    if getattr(args, "refresh", False):
+        print("  --refresh passed: running a live weekly scan first (this needs network)...")
+        cmd_weekly(argparse.Namespace(scan=15, min_views=1000, niche=None, rpm=None, list=args.list, top=25))
+
+    data = _dash_collect()
+    path = _write_dash_html(data)
+
+    reports = data.get("reports") or []
+    latest = data.get("latest")
+    lists = data.get("lists") or []
+    active_name = next((l["name"] for l in lists if l.get("active")), None) or "none set"
+    rpm = data.get("rpm") or {}
+    latest_date = latest["date"] if latest else "n/a"
+    new_count = sum(1 for r in (latest["rows"] if latest else []) if r.get("new"))
+
+    if not reports:
+        print("\n  No reports on disk yet. Run scout weekly first to fill in the outlier table and trend.")
+
+    print(f"\n\033[1mSCOUT DASH\033[0m\n")
+    print(table(
+        [[str(len(reports)), latest_date, str(new_count), active_name, f"${rpm.get('value', 0.0):.2f}"]],
+        ["Runs", "Latest", "NEW (latest)", "Active list", "RPM"],
+    ))
+    print(f"\n  -> Dashboard: {path}\n")
+
+    if getattr(args, "open", False):
+        import subprocess
+        try:
+            subprocess.run(["open", path])
+        except Exception:
+            pass
+
 # ---------- Command: mine (YOUR OWN channel's private metrics via OAuth) ----------
 # Uses curl for all Google HTTPS (this Python build has broken SSL certs) + stdlib loopback
 # for the OAuth redirect. One-time setup: a Google Cloud "Desktop app" OAuth client.
@@ -1811,6 +1845,12 @@ def main():
     kw.add_argument("--n", type=int, default=12, help="search results per competition read (default 12)")
     kw.add_argument("--html", action="store_true")
     kw.set_defaults(func=cmd_keywords)
+
+    da = sub.add_parser("dash", help="assemble reports/dashboard.html from what is already on disk, offline")
+    da.add_argument("--refresh", action="store_true", help="run a live weekly scan first, then assemble (needs network)")
+    da.add_argument("--list", default=None, help="watchlist to refresh (default: active)")
+    da.add_argument("--open", action="store_true", help="open the dashboard when done")
+    da.set_defaults(func=cmd_dash)
 
     a = sub.add_parser("audit", help="audit a channel's public packaging/length/consistency + revenue")
     a.add_argument("handle")

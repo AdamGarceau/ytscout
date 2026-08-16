@@ -41,6 +41,14 @@ keywords get a real competition read, since each one costs about `--n` seconds o
 the rest show n/a rather than guessing. Works with ollama stopped, degrades to one clear line if
 the network is down.
 
+**`scout dash [--refresh] [--open]`**
+Assembles one self-contained `reports/dashboard.html` from what is already on disk: the current
+top outlier, a run-over-run trend across your saved weekly reports, watchlist health, the RPM
+actually in use, and the last weekly-cron run status. Offline by default, zero model calls, and
+under 150KB with no embedded thumbnails, so this is what the loaded launchd weekly job can
+regenerate unattended. `--refresh` is the one opt-in network path: it runs a live weekly scan
+first (needs network), then assembles. `--open` opens the file when done.
+
 **`scout audit <handle> [--niche ai] [--rpm 6.5]`**
 Audits a channel's PUBLIC packaging, lengths (vs the doctrine's TimeZone dead-zones), consistency,
 and estimated AdSense.
