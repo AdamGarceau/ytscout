@@ -13,7 +13,7 @@ Commands:
 
 Doctrine source: ~/content-engine/strategy/youtube-consensus-doctrine.md
 """
-import sys, os, json, re, time, argparse, statistics, html, urllib.request
+import sys, os, json, re, time, argparse, statistics, html, math, ssl, urllib.request, urllib.parse
 
 CACHE_DIR = os.path.expanduser("~/ytscout/.cache")
 REPORT_DIR = os.path.expanduser("~/ytscout/reports")
@@ -151,6 +151,88 @@ def search_dump(query, n=20):
     out = {"results": res}
     _cache_put(key, out)
     return out
+
+# ---------- autocomplete demand layer (keyless) ----------
+
+_SSL_CTX = None
+
+def _ssl_ctx():
+    """Memoized SSL context. Prefers certifi's cert bundle (this box's default Python cert
+    store fails on outbound HTTPS); falls back to a plain verified default context if certifi
+    isn't installed. Certificate verification is never disabled in either branch."""
+    global _SSL_CTX
+    if _SSL_CTX is None:
+        try:
+            import certifi
+            _SSL_CTX = ssl.create_default_context(cafile=certifi.where())
+        except ImportError:
+            _SSL_CTX = ssl.create_default_context()
+    return _SSL_CTX
+
+def _fetch_json(url, timeout=6):
+    """GET url, return parsed JSON or None. Never raises."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (ytscout)"})
+        with urllib.request.urlopen(req, timeout=timeout, context=_ssl_ctx()) as r:
+            raw = r.read()
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            text = raw.decode("latin-1")
+        return json.loads(text)
+    except Exception:
+        return None
+
+def autocomplete(q):
+    """Ordered list of YouTube autocomplete suggestion strings for one query. Cached 6h."""
+    cache_key = "ac_" + q
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+    qs = urllib.parse.urlencode({"client": "firefox", "ds": "yt", "q": q})
+    data = _fetch_json(f"https://suggestqueries.google.com/complete/search?{qs}")
+    ok = isinstance(data, list) and len(data) >= 2 and isinstance(data[1], list)
+    out = [s for s in data[1] if isinstance(s, str) and s] if ok else []
+    if data is not None:
+        # a real response came back (even if empty after validation) — safe to cache
+        _cache_put(cache_key, out)
+    time.sleep(0.12)
+    return out
+
+def _expansion_queries(seed, mode):
+    quick = [seed, f"how to {seed}", f"what is {seed}", f"why {seed}", f"best {seed}",
+             f"{seed} vs", f"{seed} for", f"{seed} without", f"{seed} tutorial"]
+    if mode == "full":
+        return quick + [f"{seed} {c}" for c in "abcdefghijklmnopqrstuvwxyz"]
+    if mode == "none":
+        return [seed]
+    return quick
+
+EXPANSIONS = {"none": 1, "quick": 9, "full": 35}  # requests each mode makes
+
+def keyword_demand(seed, mode="quick"):
+    """Relative demand signal built from how often and how early a suggestion surfaces across
+    autocomplete expansions of the seed. Returns
+    {"keywords": [(kw, demand 0-100, hits), ...] sorted desc, "queries": int, "failures": int}."""
+    queries = _expansion_queries(seed, mode)
+    points, hits, failures = {}, {}, 0
+    for q in queries:
+        sugg = autocomplete(q)
+        if not sugg:
+            failures += 1
+            continue
+        for r, kw in enumerate(sugg):
+            points[kw] = points.get(kw, 0.0) + 1.0 / (1 + r)
+            hits[kw] = hits.get(kw, 0) + 1
+    if not points:
+        return {"keywords": [], "queries": len(queries), "failures": failures}
+    raw = {kw: pts * (1 + 0.15 * (hits[kw] - 1)) for kw, pts in points.items()}
+    top = max(raw.values()) or 1.0
+    scored = sorted(
+        ((kw, round(100 * v / top), hits[kw]) for kw, v in raw.items()),
+        key=lambda x: x[1], reverse=True,
+    )
+    return {"keywords": scored, "queries": len(queries), "failures": failures}
 
 # ---------- ollama (optional brain) ----------
 
