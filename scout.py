@@ -234,6 +234,79 @@ def keyword_demand(seed, mode="quick"):
     )
     return {"keywords": scored, "queries": len(queries), "failures": failures}
 
+def keyword_competition(kw, n):
+    """Computed competition score (0-100, HIGHER = HARDER) from who actually ranks for kw,
+    on log scales so one megachannel cannot saturate the number. Returns None when search_dump
+    errors or has no long-form results, so the caller renders "n/a" instead of crashing."""
+    d = search_dump(kw, n)
+    if d.get("error"):
+        return None
+    res = [r for r in d["results"] if r["dur"] > SHORT_MAX_SEC]
+    if not res:
+        return None
+    views = [r["views"] for r in res]
+    subs = [r.get("subs") or 0 for r in res]
+    med_views = statistics.median(views)
+    med_subs = statistics.median(subs)
+    views_desc = sorted(views, reverse=True)
+    total = sum(views_desc) or 1
+    top3_share = sum(views_desc[:3]) / total
+    small_share = sum(1 for s in subs if s < 100000) / len(subs)
+    subs_term = min(1.0, math.log10(max(med_subs, 1)) / 6.0)   # 1M subs saturates
+    views_term = min(1.0, math.log10(max(med_views, 1)) / 7.0)  # 10M views saturates
+    score = round(100 * (0.45 * subs_term + 0.35 * views_term + 0.20 * top3_share))
+    score = max(0, min(100, score))
+    band = "LOW" if score < 35 else ("HIGH" if score > 65 else "MED")
+    return {"score": score, "band": band, "med_views": med_views, "med_subs": med_subs,
+            "top3_share": top3_share, "small_share": small_share}
+
+def cmd_keywords(args):
+    seed = args.seed
+    print(f"\n\033[1mKEYWORD RESEARCH\033[0m  \"{seed}\"\n")
+    d = keyword_demand(seed, args.expand)
+    if not d["keywords"]:
+        print("  ! No keyword data. The network may be unreachable, or autocomplete returned no "
+              "suggestions for this seed. Nothing to rank.\n")
+        return
+    top_kws = d["keywords"][:args.top]
+    check_n = max(0, min(args.check, len(top_kws)))
+    rows = []
+    for i, (kw, demand, hits) in enumerate(top_kws):
+        comp = keyword_competition(kw, args.n) if i < check_n else None
+        if comp:
+            comp_s, band_s = str(comp["score"]), comp["band"]
+            mv, ms = human(comp["med_views"]), human(comp["med_subs"])
+        else:
+            comp_s = band_s = mv = ms = "n/a"
+        rows.append([kw[:44], str(demand), str(hits), comp_s, band_s, mv, ms])
+    print(table(rows, ["Keyword", "Demand", "Hits", "Comp", "Band", "MedViews", "MedSubs"]))
+    print(f"\n  Demand is relative, built from how often and how early a phrase surfaces in YouTube")
+    print(f"  autocomplete across {d['queries']} expansions ({args.expand} mode). It is not a search volume.")
+    print(f"  Comp is computed from who actually ranks for the phrase: median subscriber size of")
+    print(f"  ranking channels, their median views, and how concentrated views are in the top 3.")
+    print(f"  LOW means small channels are ranking, HIGH means big channels own the term.")
+    print(f"  Only the top {check_n} keyword(s) got a competition read (--check {args.check}, costs about")
+    print(f"  {args.n}s each on a cold cache). Rows past that show n/a.\n")
+    if args.html:
+        _write_keywords_html(seed, rows, d, args)
+
+def _write_keywords_html(seed, rows, d, args):
+    path = os.path.join(REPORT_DIR, "keywords.html")
+    trs = "".join(
+        "<tr>" + "".join(f"<td>{html.escape(str(c))}</td>" for c in r) + "</tr>"
+        for r in rows)
+    doc = f"""<!doctype html><meta charset=utf-8><title>keywords: {html.escape(seed)}</title>
+<style>body{{font:15px/1.5 -apple-system,system-ui,sans-serif;max-width:900px;margin:2rem auto;padding:0 1rem}}
+h1{{font-size:1.4rem}}table{{border-collapse:collapse;width:100%}}td,th{{padding:.4rem .6rem;border-bottom:1px solid #ddd;text-align:left}}
+th{{font-size:.8rem;text-transform:uppercase;color:#666}}</style>
+<h1>Keyword research: {html.escape(seed)}</h1>
+<p>Demand is relative, from {d['queries']} YouTube autocomplete expansions ({html.escape(args.expand)} mode),
+not a search volume. Comp is computed from who actually ranks (median subs, median views, top 3
+concentration). LOW means small channels are ranking, HIGH means big channels own the term.</p>
+<table><tr><th>Keyword</th><th>Demand</th><th>Hits</th><th>Comp</th><th>Band</th><th>MedViews</th><th>MedSubs</th></tr>{trs}</table>"""
+    open(path, "w").write(doc)
+    print(f"  → HTML report: {path}")
+
 # ---------- ollama (optional brain) ----------
 
 def ollama(prompt, num_ctx=8192):
@@ -1240,6 +1313,17 @@ def main():
     n.add_argument("--n", type=int, default=25)
     n.add_argument("--html", action="store_true")
     n.set_defaults(func=cmd_niche)
+
+    kw = sub.add_parser("keywords", help="free keyword demand + competition, no API key")
+    kw.add_argument("seed")
+    kw.add_argument("--expand", choices=["none", "quick", "full"], default="quick",
+                    help="autocomplete expansion breadth (none=1 request, quick=9, full=35)")
+    kw.add_argument("--top", type=int, default=20, help="keywords to show (default 20)")
+    kw.add_argument("--check", type=int, default=5,
+                    help="how many top keywords get a competition read, each costs about n seconds cold (default 5)")
+    kw.add_argument("--n", type=int, default=12, help="search results per competition read (default 12)")
+    kw.add_argument("--html", action="store_true")
+    kw.set_defaults(func=cmd_keywords)
 
     a = sub.add_parser("audit", help="audit a channel's public packaging/length/consistency + revenue")
     a.add_argument("handle")
