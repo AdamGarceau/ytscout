@@ -281,13 +281,20 @@ def cmd_keywords(args):
             comp_s = band_s = mv = ms = "n/a"
         rows.append([kw[:44], str(demand), str(hits), comp_s, band_s, mv, ms])
     print(table(rows, ["Keyword", "Demand", "Hits", "Comp", "Band", "MedViews", "MedSubs"]))
+    q = d['queries']
     print(f"\n  Demand is relative, built from how often and how early a phrase surfaces in YouTube")
-    print(f"  autocomplete across {d['queries']} expansions ({args.expand} mode). It is not a search volume.")
-    print(f"  Comp is computed from who actually ranks for the phrase: median subscriber size of")
-    print(f"  ranking channels, their median views, and how concentrated views are in the top 3.")
-    print(f"  LOW means small channels are ranking, HIGH means big channels own the term.")
-    print(f"  Only the top {check_n} keyword(s) got a competition read (--check {args.check}, costs about")
-    print(f"  {args.n}s each on a cold cache). Rows past that show n/a.\n")
+    print(f"  autocomplete across {q} {'expansion' if q == 1 else 'expansions'} ({args.expand} mode). "
+          f"It is not a search volume.")
+    if check_n:
+        print(f"  Comp is computed from who actually ranks for the phrase: median subscriber size of")
+        print(f"  ranking channels, their median views, and how concentrated views are in the top 3.")
+        print(f"  LOW means small channels are ranking, HIGH means big channels own the term.")
+        print(f"  The top {check_n} {'keyword' if check_n == 1 else 'keywords'} got a competition read "
+              f"(--check {args.check}, about")
+        print(f"  {args.n}s each on a cold cache). Rows past that show n/a.\n")
+    else:
+        print(f"  Competition was not read this run (--check 0). Raise --check to score how hard")
+        print(f"  the top keywords are to rank for.\n")
     if args.html:
         _write_keywords_html(seed, rows, d, args)
 
