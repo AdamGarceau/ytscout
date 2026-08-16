@@ -14,7 +14,7 @@ Commands:
 
 Doctrine source: ~/content-engine/strategy/youtube-consensus-doctrine.md
 """
-import sys, os, json, re, time, argparse, statistics, html, math, ssl, urllib.request, urllib.parse
+import sys, os, json, re, time, glob, argparse, statistics, html, math, ssl, urllib.request, urllib.parse
 
 CACHE_DIR = os.path.expanduser("~/ytscout/.cache")
 REPORT_DIR = os.path.expanduser("~/ytscout/reports")
@@ -1115,6 +1115,196 @@ def _write_weekly_report(handles, niche, rpm, hot, listname=None):
     lines += ["", "Port each concept into your niche (Niche Comparison Theory). Est$ is the AdSense floor; owned products are the business."]
     open(path, "w").write("\n".join(lines))
     print(f"  → Report saved: {path}")
+
+# ---------- Command: dash (offline HTML assembly, zero AI, zero network by default) ----------
+# Pure read/render layer. Nothing below may import yt_dlp or call ollama/_ydl/_fetch_json/
+# channel_dump/search_dump/_curl_json or open a socket. cmd_dash's --refresh branch is the
+# one exception, and it is gated by an AST check in the plan's verification.
+
+def _dash_num(s):
+    """'3.89x' -> 3.89, '126.2K' -> 126200, '$1.3k' -> 1300. 0.0 on anything unparseable."""
+    if not s:
+        return 0.0
+    s = str(s).strip()
+    m = re.search(r"[\d.]+", s)
+    if not m:
+        return 0.0
+    try:
+        n = float(m.group(0))
+    except Exception:
+        return 0.0
+    low = s.lower()
+    if "k" in low:
+        n *= 1000
+    elif "m" in low:
+        n *= 1_000_000
+    return n
+
+def _parse_weekly_md(path):
+    """Parse one weekly*.md report. Returns None on any unreadable file, never raises."""
+    try:
+        if not os.path.exists(path):
+            return None
+        text = open(path, encoding="utf-8", errors="replace").read()
+    except Exception:
+        return None
+    lines = text.splitlines()
+    date = None
+    niche = None
+    rpm = None
+    handles = []
+    for line in lines:
+        if line.startswith("#") and date is None:
+            m = re.search(r"(\d{4}-\d{2}-\d{2})", line)
+            if m:
+                date = m.group(1)
+        if line.strip().lower().startswith("channels:"):
+            nm = re.search(r"niche:\s*([^\s(]+)", line)
+            rm = re.search(r"\$([\d.]+)\s*RPM", line)
+            niche = nm.group(1) if nm else None
+            rpm = float(rm.group(1)) if rm else None
+            handles = re.findall(r"@([A-Za-z0-9_.-]+)", line)
+    if date is None:
+        m = re.search(r"(\d{4}-\d{2}-\d{2})", os.path.basename(path))
+        if m:
+            date = m.group(1)
+    if date is None:
+        try:
+            date = time.strftime("%Y-%m-%d", time.localtime(os.path.getmtime(path)))
+        except Exception:
+            date = None
+    rows = []
+    for line in lines:
+        if not line.startswith("|"):
+            continue
+        try:
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if len(cells) < 8:
+                continue
+            if cells[0].strip().lower() == "new" and cells[1].strip().lower() == "v/sub":
+                continue  # header row (distinguish from a data row whose New flag is "NEW")
+            if all(set(c) <= {"-"} for c in cells if c):
+                continue  # separator row
+            new = cells[0].upper() == "NEW"
+            vsub = cells[1]
+            vsmed = cells[2]
+            views = cells[3]
+            est = cells[4]
+            channel = cells[5]
+            link = cells[-1]
+            title = " | ".join(cells[6:-1]).strip()
+            if vsub in ("—", "-", ""):
+                vsub = "n/a"
+            row = {
+                "new": new, "vsub": vsub, "vsmed": vsmed, "views": views, "est": est,
+                "channel": channel, "title": title, "link": link,
+                "vsmed_n": _dash_num(vsmed), "views_n": _dash_num(views), "est_n": _dash_num(est),
+            }
+            rows.append(row)
+        except Exception:
+            continue
+    return {
+        "path": path, "file": os.path.basename(path), "date": date, "niche": niche,
+        "rpm": rpm, "handles": handles, "rows": rows,
+    }
+
+def _dash_cron_status(report_dir=None):
+    """Reads weekly-cron.log/.err. Never raises; returns safe defaults on any exception."""
+    report_dir = report_dir if report_dir is not None else REPORT_DIR
+    out = {"present": False, "log_mtime": None, "err_mtime": None, "age_days": None,
+           "error_lines": 0, "last_line": None}
+    try:
+        log_path = os.path.join(report_dir, "weekly-cron.log")
+        err_path = os.path.join(report_dir, "weekly-cron.err")
+        out["present"] = os.path.exists(log_path)
+        if out["present"]:
+            out["log_mtime"] = os.path.getmtime(log_path)
+            out["age_days"] = int((time.time() - out["log_mtime"]) // 86400)
+            try:
+                lines = [l for l in open(log_path, encoding="utf-8", errors="replace").read().splitlines() if l.strip()]
+                if lines:
+                    last = re.sub(r"\x1b\[[0-9;]*m", "", lines[-1])
+                    out["last_line"] = last[:120]
+            except Exception:
+                pass
+        if os.path.exists(err_path):
+            out["err_mtime"] = os.path.getmtime(err_path)
+            try:
+                err_text = open(err_path, encoding="utf-8", errors="replace").read()
+                out["error_lines"] = sum(1 for l in err_text.splitlines() if l.startswith("ERROR:"))
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return out
+
+def _dash_collect(report_dir=None, wl=None):
+    """Pure offline assembly of the whole dashboard payload. Never raises."""
+    report_dir = report_dir if report_dir is not None else REPORT_DIR
+    wl = wl if wl is not None else load_watchlist()
+    payload = {"reports": [], "lists": [], "trend": [], "latest": None,
+               "rpm": {"value": DEFAULT_RPM, "niche": None, "source": "fallback default"},
+               "seen_count": 0, "cron": _dash_cron_status(report_dir)}
+    try:
+        paths = sorted(glob.glob(os.path.join(report_dir, "weekly*.md")))
+    except Exception:
+        paths = []
+    reports = []
+    for p in paths:
+        r = _parse_weekly_md(p)
+        if r is not None:
+            reports.append(r)
+    reports.sort(key=lambda r: (r["date"] or "", r["file"]))
+    payload["reports"] = reports
+    payload["trend"] = [
+        {"date": r["date"], "niche": r["niche"], "new": sum(1 for row in r["rows"] if row["new"]),
+         "total": len(r["rows"])}
+        for r in reports
+    ]
+    active_name = wl.get("active")
+    active_niche = None
+    if active_name and active_name in wl.get("lists", {}):
+        active_niche = wl["lists"][active_name].get("niche")
+    latest = None
+    if active_niche:
+        for r in reversed(reports):
+            if r["niche"] == active_niche:
+                latest = r
+                break
+    if latest is None and reports:
+        latest = reports[-1]
+    payload["latest"] = latest
+    lists = []
+    for name, l in wl.get("lists", {}).items():
+        niche = l.get("niche")
+        lists.append({
+            "name": name, "niche": niche, "count": len(l.get("handles", [])),
+            "active": name == active_name, "rpm": real_rpm(niche),
+        })
+    payload["lists"] = lists
+    rpm_niche = active_niche or (latest["niche"] if latest else None)
+    rpm_value = real_rpm(rpm_niche)
+    source = "fallback default"
+    try:
+        cfg_path = os.path.expanduser("~/ytscout/rpm.json")
+        if os.path.exists(cfg_path):
+            saved = json.load(open(cfg_path))
+            if (rpm_niche and rpm_niche in saved) or "default" in saved:
+                source = "your Studio number"
+            elif rpm_niche in RPM_TIERS:
+                source = "niche tier estimate"
+        elif rpm_niche in RPM_TIERS:
+            source = "niche tier estimate"
+    except Exception:
+        source = "fallback default"
+    payload["rpm"] = {"value": rpm_value, "niche": rpm_niche, "source": source}
+    try:
+        seen_path = os.path.join(CACHE_DIR, "weekly_seen.json")
+        if os.path.exists(seen_path):
+            payload["seen_count"] = len(json.load(open(seen_path)))
+    except Exception:
+        payload["seen_count"] = 0
+    return payload
 
 # ---------- Command: mine (YOUR OWN channel's private metrics via OAuth) ----------
 # Uses curl for all Google HTTPS (this Python build has broken SSL certs) + stdlib loopback
