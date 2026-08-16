@@ -30,6 +30,17 @@ psychological frames). `--ai` generates 5 stronger variants.
 Shows what ranks for a term, the view distribution, and whether the top is saturated (bend the
 angle) or spread (room to enter).
 
+**`scout keywords "<seed>" [--expand none|quick|full] [--top N] [--check N] [--n N] [--html]`**
+Free, keyless keyword research. Demand is relative, built from how often and how early a phrase
+surfaces across YouTube autocomplete expansions of your seed, never presented as a search volume.
+Competition is computed from who actually ranks for each phrase: the median subscriber size of
+ranking channels, their median views, and how concentrated the top-3 results are. LOW means small
+channels are ranking, HIGH means big channels own the term. `--expand` controls how many
+autocomplete requests run (none=1, quick=9, full=35). `--check N` bounds how many of the top
+keywords get a real competition read, since each one costs about `--n` seconds on a cold cache;
+the rest show n/a rather than guessing. Works with ollama stopped, degrades to one clear line if
+the network is down.
+
 **`scout audit <handle> [--niche ai] [--rpm 6.5]`**
 Audits a channel's PUBLIC packaging, lengths (vs the doctrine's TimeZone dead-zones), consistency,
 and estimated AdSense.
@@ -57,7 +68,8 @@ It is NOT loaded. To turn it on:
 To turn it off:  `launchctl unload ...` the same path.
 
 ## Honest limits
-- Views/subs/durations/dates are public data via yt-dlp. Search *volume* and *competition scores*
-  (what vidIQ sells) need a paid API; ytscout uses view distribution as the free proxy.
+- Views/subs/durations/dates are public data via yt-dlp. `scout keywords` computes a relative
+  demand signal from YouTube autocomplete and a competition score from live ranking data, both
+  keyless. Neither is an absolute search volume the way a paid tool like vidIQ reports one.
 - Your own CTR/retention/impressions need OAuth to your channel's Analytics API — not built yet.
 - Data is cached 6h in `.cache/` so repeat runs are instant.

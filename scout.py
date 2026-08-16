@@ -9,6 +9,7 @@ Commands:
   scout outliers <handle> [--vs h1,h2,...] [--min-views N] [--days N] [--top N] [--html]
   scout title "<proposed title>" [--ai]
   scout niche "<search query>" [--n N] [--html]
+  scout keywords "<seed>" [--expand none|quick|full] [--top N] [--check N] [--n N] [--html]
   scout audit <handle> [--html]
 
 Doctrine source: ~/content-engine/strategy/youtube-consensus-doctrine.md
@@ -512,7 +513,9 @@ def cmd_niche(args):
         print("  \033[33mSaturated at the top\033[0m — a few big channels dominate. Bend the angle (Niche Comparison Theory) rather than compete head-on.")
     else:
         print("  \033[32mViews are spread\033[0m — room for a well-packaged newcomer. Model the highest vsMed title.")
-    print("  Note: yt-dlp shows public views, not search volume/competition scores (those need a paid API). Views distribution is the free proxy.\n")
+    print("  Note: this view distribution is the saturation read for one term. Run scout keywords")
+    print(f"  \"{args.query}\" for relative demand from YouTube autocomplete plus a computed competition")
+    print("  score across related terms, no API key needed.\n")
     if args.html:
         path = os.path.join(REPORT_DIR, "niche.html")
         rows_h = "".join(f"<tr><td>{human(r['views'])}</td><td>{html.escape(r['channel'])}</td>"
