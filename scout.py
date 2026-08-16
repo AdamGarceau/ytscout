@@ -1257,11 +1257,6 @@ def _dash_collect(report_dir=None, wl=None):
             reports.append(r)
     reports.sort(key=lambda r: (r["date"] or "", r["file"]))
     payload["reports"] = reports
-    payload["trend"] = [
-        {"date": r["date"], "niche": r["niche"], "new": sum(1 for row in r["rows"] if row["new"]),
-         "total": len(r["rows"])}
-        for r in reports
-    ]
     active_name = wl.get("active")
     active_niche = None
     if active_name and active_name in wl.get("lists", {}):
@@ -1275,6 +1270,27 @@ def _dash_collect(report_dir=None, wl=None):
     if latest is None and reports:
         latest = reports[-1]
     payload["latest"] = latest
+    # The trend must be ONE watchlist over time, not every list interleaved. Reports from
+    # different niches on the same date are different runs of different channel sets, so
+    # plotting them side by side would read as a rise or fall that never happened. Scope to
+    # the niche we are actually showing, then drop same-date duplicates (the untagged
+    # weekly-DATE.md filename predates the tagged one and repeats a run already counted).
+    trend_niche = (latest or {}).get("niche") if latest else None
+    trend_src = [r for r in reports if r["niche"] == trend_niche] if trend_niche else reports
+    seen_dates, deduped = set(), []
+    for r in trend_src:
+        key = (r["date"], r["niche"])
+        if key in seen_dates:
+            continue
+        seen_dates.add(key)
+        deduped.append(r)
+    payload["trend_niche"] = trend_niche
+    payload["trend_skipped"] = len(reports) - len(deduped)
+    payload["trend"] = [
+        {"date": r["date"], "niche": r["niche"], "new": sum(1 for row in r["rows"] if row["new"]),
+         "total": len(r["rows"])}
+        for r in deduped
+    ]
     lists = []
     for name, l in wl.get("lists", {}).items():
         niche = l.get("niche")
@@ -1429,7 +1445,8 @@ a:hover { color:var(--ember); }
 .lr-age { font-size:13px; color:var(--muted); margin-top:4px; }
 .lr-line { font-family:var(--font-data); font-size:11px; color:var(--muted); margin-top:10px; word-break:break-word; }
 .empty { color:var(--muted); font-size:15px; }
-.page-foot { margin-top:96px; padding-top:30px; border-top:1px solid var(--hairline); }
+.wrap-foot { padding-top:0; }
+.page-foot { margin-top:72px; padding-top:30px; border-top:1px solid var(--hairline); }
 .page-foot p { font-size:13px; color:var(--muted); max-width:66ch; }
 """
 
@@ -1461,7 +1478,15 @@ def _write_dash_html(data, path=None):
     if trend:
         total_new = sum(t.get("new") or 0 for t in trend)
         span = f"{trend[0].get('date')} to {trend[-1].get('date')}"
-        caption = f"{len(trend)} runs, {span}, {total_new} NEW outliers total."
+        tn = data.get("trend_niche")
+        scope = f"{_dash_esc(tn)} watchlist" if tn else "all watchlists"
+        caption = (f"{len(trend)} {'run' if len(trend) == 1 else 'runs'} of the {scope}, "
+                   f"{span}, {total_new} NEW outliers total.")
+        skipped = data.get("trend_skipped") or 0
+        if skipped:
+            caption += (f" {skipped} report{'' if skipped == 1 else 's'} on disk "
+                        f"{'is' if skipped == 1 else 'are'} from another watchlist or a "
+                        f"duplicate of a run already counted, so held out of this line.")
     else:
         caption = "No trend yet. Run scout weekly to start one."
 
@@ -1580,7 +1605,7 @@ def _write_dash_html(data, path=None):
   </div>
 </div>
 
-<div class="wrap">
+<div class="wrap wrap-foot">
   <footer class="page-foot">
     <p>Generated {gen_ts}. Assembled offline from files already on disk, no network call and no model
     call. Thumbnails are left out on purpose so this file stays under 150KB (reports/feed.html is
