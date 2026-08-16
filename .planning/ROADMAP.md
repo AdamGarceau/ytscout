@@ -9,7 +9,7 @@ makes the tool's own launch claim false, and gives it a face.
 ## Milestones
 
 - ✅ **v1.0 Core** - Phase 1 (shipped 2026-07-14)
-- 🚧 **v1.1 Demand + Face** - Phases 2-3 (in progress)
+- ✅ **v1.1 Demand + Face** - Phases 2-3 (shipped 2026-08-16)
 
 ## Phases
 
@@ -34,7 +34,7 @@ Shipped commands:
 
 </details>
 
-### 🚧 v1.1 Demand + Face (In Progress)
+### ✅ v1.1 Demand + Face (SHIPPED 2026-08-16)
 
 **Milestone goal:** make the launch claim true, then make the tool presentable on camera.
 
@@ -56,19 +56,19 @@ Plans:
 - [x] 02-01: `scout keywords` + retire the cmd_niche disclaimer — see
   `.planning/quick/260816-crb-add-scout-keywords-command-with-free-dem/260816-crb-SUMMARY.md`
 
-#### Phase 3: Dashboard
+#### Phase 3: Dashboard — COMPLETE 2026-08-16
 **Goal**: `scout dash` writes one self-contained `reports/dashboard.html` good enough to put on
 camera, regenerated daily by the already-loaded launchd job.
 **Depends on**: Phase 2
 **Success Criteria** (what must be TRUE):
-  1. `scout dash` writes a single self-contained HTML file with no external assets.
-  2. Nothing on the render path calls a model, so the launchd job produces it unattended.
-  3. It reads as designed rather than default-generated (run `web-design-craft` first).
+  1. [x] `scout dash` writes a single self-contained HTML file with no external assets.
+  2. [x] Nothing on the render path calls a model, so the launchd job produces it unattended.
+  3. [x] It reads as designed rather than default-generated (run `web-design-craft` first).
 **Plans**: 1 plan (quick task)
 
 Plans:
-- [ ] 03-01: `scout dash` (offline HTML assembly, designed for camera) - see
-  `.planning/quick/260816-d4i-add-scout-dash-a-self-contained-offline-/260816-d4i-PLAN.md`
+- [x] 03-01: `scout dash` (offline HTML assembly, designed for camera) - see
+  `.planning/quick/260816-d4i-add-scout-dash-a-self-contained-offline-/260816-d4i-SUMMARY.md`
 
 ## Progress
 
@@ -76,4 +76,4 @@ Plans:
 |-------|-----------|----------------|--------|-----------|
 | 1. Doctrine-grounded core | v1.0 | n/a | Complete | 2026-07-14 |
 | 2. Keyword demand + competition | v1.1 | 1/1 | Complete | 2026-08-16 |
-| 3. Dashboard | v1.1 | 0/1 | Not started | - |
+| 3. Dashboard | v1.1 | 1/1 | Complete | 2026-08-16 |
