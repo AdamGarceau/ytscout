@@ -67,7 +67,8 @@ camera, regenerated daily by the already-loaded launchd job.
 **Plans**: 1 plan (quick task)
 
 Plans:
-- [ ] 03-01: `scout dash`
+- [ ] 03-01: `scout dash` (offline HTML assembly, designed for camera) - see
+  `.planning/quick/260816-d4i-add-scout-dash-a-self-contained-offline-/260816-d4i-PLAN.md`
 
 ## Progress
 
