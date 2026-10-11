@@ -12,6 +12,7 @@ Commands:
   scout keywords "<seed>" [--expand none|quick|full] [--top N] [--check N] [--n N] [--html]
   scout dash [--refresh] [--open]
   scout audit <handle> [--html]
+  scout peers [--list ai] [--min-subs 50] [--max-subs 15000] [--n 10] [--queries FILE]
 
 Doctrine source: ~/content-engine/strategy/youtube-consensus-doctrine.md
 """
@@ -129,7 +130,7 @@ def channel_dump(handle, limit=30):
     return out
 
 def search_dump(query, n=20):
-    key = f"search_{query}_{n}"
+    key = f"search2_{query}_{n}"
     cached = _cache_get(key)
     if cached:
         return cached
@@ -149,6 +150,8 @@ def search_dump(query, n=20):
             "dur": e.get("duration") or 0,
             "channel": e.get("channel") or e.get("uploader") or "?",
             "subs": e.get("channel_follower_count"),
+            "handle": (e.get("uploader_id") or "").lstrip("@"),
+            "channel_id": e.get("channel_id"),
         })
     out = {"results": res}
     _cache_put(key, out)
@@ -848,7 +851,7 @@ button{cursor:pointer;border:0;border-radius:8px;padding:10px 12px;font-weight:6
     <label class=thumbdrop id=thumbdrop for=thumbfile><span id=thumbtext>click to upload an image (or drag one in)</span><img id=thumbprev style=display:none></label>
     <input id=thumbfile type=file accept="image/*" style=display:none>
     <label>Thumbnail idea (for the audience panel, optional)</label>
-    <textarea id=thumbdesc placeholder="e.g. split screen: 'vidIQ $40/mo' with a red X vs a terminal at '$0', my face closed-mouth"></textarea>
+    <textarea id=thumbdesc placeholder="e.g. split screen: 'vidIQ $19/mo' with a red X vs a terminal at '$0', my face closed-mouth"></textarea>
 
     <button class=b-primary id=preview>Preview in YouTube ▸</button>
     <button class=b-ghost id=testpanel>Test with audience (local AI)</button>
@@ -867,7 +870,7 @@ button{cursor:pointer;border:0;border-radius:8px;padding:10px 12px;font-weight:6
 <script>
 let realCards=[], myThumb=null, selIdx=0;
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
-const seed=["I Replaced a $40/Month App in One Afternoon",""];
+const seed=["",""];
 
 function renderTitleRows(){
   const box=$('#titles'); box.innerHTML='';
@@ -1116,6 +1119,157 @@ def _write_weekly_report(handles, niche, rpm, hot, listname=None):
     lines += ["", "Port each concept into your niche (Niche Comparison Theory). Est$ is the AdSense floor; owned products are the business."]
     open(path, "w").write("\n".join(lines))
     print(f"  → Report saved: {path}")
+
+# ---------- Command: peers (discover same-size channels with outsized returns) ----------
+
+PEERS_QUERIES_DEFAULT = os.path.expanduser("~/ytscout/peers-queries-{list}.txt")
+PEERS_STOP = set("a an and the for to of in on with my your i is it how what do does vs no or at by from this that are be can".split())
+PEERS_ANCHORS = {"claude", "ai", "gpt", "chatgpt", "ollama", "llm", "local", "codex", "cursor", "gemini", "agent", "agents", "vibe", "coding", "code", "resolve", "davinci", "software", "saas", "anthropic", "automation"}
+PEERS_EXCLUDE_HANDLES = {"adamgarceau", "adamgarceau-e2f"}
+PEERS_EXCLUDE_IDS = {"UCvRzOAuSxArqvN0yR3W6dLw", "UCDsc53iXVoZgA5A99cyWNqA"}
+
+def _peers_tokens(text):
+    return {w for w in re.findall(r"[a-z0-9]+", text.lower()) if w not in PEERS_STOP and len(w) > 2}
+
+def _peers_load_queries(path):
+    qs = []
+    for ln in open(path):
+        ln = ln.strip()
+        if ln and not ln.startswith("#"):
+            qs.append(ln)
+    return qs
+
+def _peers_score(ch, handle, seed_tokens, now):
+    """Return a peer record or None. Uses 90-day long-form uploads."""
+    subs = ch.get("subs") or 0
+    longs = [v for v in ch.get("videos", []) if v["dur"] > SHORT_MAX_SEC and v.get("date")]
+    if not longs:
+        return None
+    def age(v):
+        try:
+            return (now - time.mktime(time.strptime(v["date"], "%Y%m%d"))) / 86400
+        except Exception:
+            return 9999
+    med = statistics.median([v["views"] for v in longs]) or 1
+    rec = [v for v in longs if age(v) <= 90]
+    if len(rec) < 3:
+        return None
+    ratios = [v["views"] / med for v in rec]
+    n5 = sum(1 for v in rec if subs and v["views"] >= 5 * subs)
+    fit_hits = sum(1 for v in rec if len(_peers_tokens(v["title"]) & seed_tokens) >= 2 and _peers_tokens(v["title"]) & PEERS_ANCHORS)
+    fit = fit_hits / len(rec)
+    best = max(rec, key=lambda v: v["views"] / med)
+    m1 = statistics.median(ratios)
+    score = (m1 + 0.5 * n5) * (0.5 + fit)
+    return {"handle": handle, "name": ch.get("name") or handle, "subs": subs, "up90": len(rec),
+            "med": med, "m1": round(m1, 2), "n5": n5, "fit": round(fit, 2), "score": round(score, 2),
+            "best": {"id": best["id"], "title": best["title"], "views": best["views"],
+                     "osc": round(best["views"] / med, 1), "age": int(age(best)),
+                     "vps": round(best["views"] / subs, 1) if subs else None, "dur": best["dur"]},
+            "outliers60": [dict(id=v["id"], title=v["title"], views=v["views"], osc=round(v["views"] / med, 1),
+                                age=int(age(v)), dur=v["dur"]) for v in rec if age(v) <= 60 and v["views"] / med >= 5]}
+
+def _peers_brief(ch, v, niche_note):
+    prompt = (f"A small YouTube channel ('{ch['name']}', {human(ch['subs'])} subs) posted '{v['title']}' "
+              f"({human(v['views'])} views, {v['osc']}x its channel median, {v['age']} days ago, {v['dur']//60} min). "
+              f"In ONE paragraph (max 110 words) say: what the video most likely is, why it likely popped (title, thumbnail, topic; "
+              f"mark guesses as guesses since you have not watched it), and how Adam, a non-coder-friendly 'build real things with Claude' "
+              f"channel (not a video-editing channel), could make his own version bent through his niche. Plain prose, no markdown, no em dashes.")
+    out = ollama(prompt)
+    if out.startswith("[ollama unavailable"):
+        out = (f"Video: '{v['title']}'. It ran {v['osc']}x this channel's median at {human(ch['subs'])} subs. Likely drivers: topic/title "
+               f"(unverified, not watched). Adam version: same promise, built live with Claude on a real owner problem. (model brief unavailable)")
+    out = out.replace("—", ",")
+    if out and out[-1] not in ".!?" and "." in out:
+        out = out[:out.rindex(".") + 1]   # drop a cut-off trailing sentence
+    return out
+
+def cmd_peers(args):
+    listname = args.list
+    qpath = args.queries or PEERS_QUERIES_DEFAULT.format(list=listname)
+    if not os.path.exists(qpath):
+        print(f"\n  No queries file: {qpath}\n"); return
+    queries = _peers_load_queries(qpath)
+    seed_tokens = set().union(*[_peers_tokens(q) for q in queries]) - {"app", "build", "built", "make", "own", "tested", "using"}
+    data = load_watchlist()
+    known = set()
+    for nm, l in data["lists"].items():
+        if nm != f"peers-{listname}":
+            known |= {h.lower() for h in l["handles"]}   # giants/other lists never count as peers
+    print(f"\n\033[1mPEERS\033[0m  {len(queries)} queries, band {args.min_subs}-{args.max_subs} subs, cap {args.cap} candidates\n")
+    cands = {}   # handle -> {subs, hits}
+    for q in queries:
+        sd = search_dump(q, args.per_query)
+        if sd.get("error"):
+            print(f"  ! {q}: {sd['error'][:80]}")
+            if "429" in sd["error"]:
+                print("  429 from YouTube: stopping discovery; rerun the same command to resume from cache."); break
+            continue
+        time.sleep(args.sleep)
+        for r in sd["results"]:
+            h, subs = r.get("handle"), r.get("subs")
+            if not h or h.lower() in PEERS_EXCLUDE_HANDLES or r.get("channel_id") in PEERS_EXCLUDE_IDS or h.lower() in known:
+                continue
+            if subs is None or not (args.min_subs <= subs <= args.max_subs):
+                continue
+            c = cands.setdefault(h, {"subs": subs, "hits": 0, "views": 0})
+            c["hits"] += 1; c["views"] = max(c["views"], r["views"])
+    ranked = sorted(cands.items(), key=lambda kv: (-kv[1]["hits"], -kv[1]["views"]))[:args.cap]
+    print(f"\n  {len(cands)} channels in band; scanning top {len(ranked)}\n")
+    now = time.time()
+    peers = []
+    from concurrent.futures import ThreadPoolExecutor
+    def _fetch(hc):
+        ch = channel_dump(hc[0], limit=args.scan)
+        time.sleep(args.sleep)
+        return hc, ch
+    with ThreadPoolExecutor(max_workers=args.workers) as ex:
+        fetched = list(ex.map(_fetch, ranked))
+    for (h, c), ch in fetched:
+        if ch.get("error"):
+            if "429" in ch["error"]:
+                print(f"  429 on @{h}: rerun the same command to resume from cache.")
+            continue
+        subs = ch.get("subs") or c["subs"]
+        if not (args.min_subs <= subs <= args.max_subs):
+            continue
+        ch["subs"] = subs
+        p = _peers_score(ch, h, seed_tokens, now)
+        if p and p["fit"] > 0:
+            p["hits"] = c["hits"]; peers.append(p)
+    peers.sort(key=lambda p: p["score"], reverse=True)
+    top = peers[:args.n]
+    rows = [[f"@{p['handle'][:20]}", human(p["subs"]), p["up90"], f"{p['m1']}x", p["n5"], f"{p['best']['osc']}x",
+             f"{int(p['fit']*100)}%", p["hits"], p["score"]] for p in top]
+    print(table(rows, ["Channel", "Subs", "Up/90d", "MedRatio", "N@5xSubs", "BestOutlier", "Fit", "Qhits", "Score"]))
+    # remake briefs: top 5 outlier videos (5x+ channel median, last 60d) across the peers list
+    pool = sorted([(p, v) for p in top for v in p["outliers60"]], key=lambda pv: pv[1]["osc"], reverse=True)[:5]
+    briefs = []
+    for p, v in pool:
+        briefs.append((p, v, _peers_brief(p, v, None)))
+    stamp = time.strftime("%Y-%m-%d")
+    path = os.path.join(REPORT_DIR, f"peers-{listname}-{stamp}.md")
+    L = [f"# Peers ({listname}) — {stamp}", "",
+         f"{len(queries)} seed queries, sub band {args.min_subs}-{args.max_subs}, {len(ranked)} candidates scanned, {len(peers)} qualified (3+ long-forms in 90d, topical fit > 0).", "",
+         "Score = (median of last-90d views / channel median + 0.5 x videos at 5x+ subs) x (0.5 + fit). Fit = share of 90d titles sharing 2+ seed terms. Views are lifetime.", "",
+         "| Channel | Subs | Up/90d | MedRatio | N@5xSubs | Best outlier | Fit | Score |", "|---|---|---|---|---|---|---|---|"]
+    for p in top:
+        b = p["best"]
+        L.append(f"| [@{p['handle']}](https://youtube.com/@{p['handle']}) | {human(p['subs'])} | {p['up90']} | {p['m1']}x | {p['n5']} | "
+                 f"[{b['title'][:50]}](https://youtu.be/{b['id']}) {human(b['views'])} ({b['osc']}x) | {int(p['fit']*100)}% | {p['score']} |")
+    L += ["", "## Remake brief CANDIDATES (for teardown, not scripts)", "",
+          "Each is 5x+ its channel median within 60 days. Per feedback_remake_full_teardown: none of these is scriptable until a full teardown (transcript, beat map, most-replayed, comments). Per feedback_niche_bend: an in-niche outlier means the topic is TAKEN; run the empty-cell check before filming. Briefs are written by local gemma from title/stats only (video not watched); guesses are guesses.", ""]
+    if not briefs:
+        L.append("_No peer video cleared 5x its channel median in the last 60 days._")
+    for i, (p, v, b) in enumerate(briefs, 1):
+        L += [f"### {i}. {v['title']}", f"@{p['handle']} · {human(p['subs'])} subs · {human(v['views'])} views · {v['osc']}x median · {v['age']}d old · https://youtu.be/{v['id']}", "", b, ""]
+    open(path, "w").write("\n".join(L))
+    print(f"\n  → Report saved: {path}")
+    if args.save and top:
+        data = load_watchlist()
+        data["lists"][f"peers-{listname}"] = {"handles": [p["handle"] for p in top], "niche": listname}
+        json.dump(data, open(WATCHLIST, "w"), indent=2)
+        print(f"  → Saved {len(top)} handles to watchlist list 'peers-{listname}' (run: scout weekly --list peers-{listname})\n")
 
 # ---------- Command: dash (offline HTML assembly, zero AI, zero network by default) ----------
 # Pure read/render layer. Nothing below may import yt_dlp or call ollama/_ydl/_fetch_json/
@@ -1840,6 +1994,20 @@ def main():
     w.add_argument("--list", default=None, help="which watchlist to scan (default: active)")
     w.add_argument("--top", type=int, default=25)
     w.set_defaults(func=cmd_weekly)
+
+    pe = sub.add_parser("peers", help="discover same-size peer channels with outsized returns (saves list peers-<list>)")
+    pe.add_argument("--list", default="ai", help="niche list name; reads peers-queries-<list>.txt, saves peers-<list> (default ai)")
+    pe.add_argument("--queries", default=None, help="queries file, one per line (default ~/ytscout/peers-queries-<list>.txt)")
+    pe.add_argument("--min-subs", type=int, default=50)
+    pe.add_argument("--max-subs", type=int, default=15000)
+    pe.add_argument("--n", type=int, default=10, help="peers to keep/show")
+    pe.add_argument("--cap", type=int, default=120, help="max candidate channels to scan")
+    pe.add_argument("--per-query", type=int, default=12, help="search results per query")
+    pe.add_argument("--scan", type=int, default=15, help="recent videos per candidate channel (default 15, shares the weekly cache)")
+    pe.add_argument("--workers", type=int, default=4, help="parallel channel fetches")
+    pe.add_argument("--sleep", type=float, default=1.5, help="seconds between network calls")
+    pe.add_argument("--no-save", dest="save", action="store_false", help="don't write the peers list to watchlist.json")
+    pe.set_defaults(func=cmd_peers)
 
     wa = sub.add_parser("watch", help="manage watchlists of comparable channels (one per channel/niche)")
     wa.add_argument("--list", default=None, help="which named list to edit (e.g. ai, homeschool)")

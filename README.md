@@ -17,6 +17,15 @@ Scans your watchlist for new outliers since last run, flags what's NEW, saves a 
 `reports/weekly-YYYY-MM-DD.md`. This is the doctrine's weekly idea-farm ritual, automated.
 Manage the list: `scout watch --add liamottley,MikeyNoCode --niche ai`
 
+**`scout peers [--list ai] [--min-subs 50] [--max-subs 15000] [--n 10] [--cap 120] [--queries FILE]`**
+Finds your PEERS: same-size channels in your lane with outsized returns. Searches the seed terms in
+`peers-queries-<list>.txt` (edit it), keeps channels in the sub band with 3+ long-forms in 90 days and
+topical fit, ranks by median video/channel-median plus videos at 5x+ subs, and writes
+`reports/peers-<list>-YYYY-MM-DD.md` with 5 remake-brief CANDIDATES (teardown first, not scripts; briefs
+come from local gemma, title/stats only). Saves the top N to watchlist list `peers-<list>` (never touches
+the others). Then farm them weekly: `scout weekly --list peers-ai`. Cached and rate-limit gentle; on a
+429 just rerun the same command to resume.
+
 **`scout feed "<niche>" --my-title "..." [--my-thumb path.jpg] [--pos 3] [--open]`**
 Renders YOUR proposed title + thumbnail among REAL niche videos in a YouTube-style grid, so you can
 see if your packaging stops the scroll before you upload. The doctrine's pre-upload gate. Output:
