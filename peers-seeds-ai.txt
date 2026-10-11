@@ -1,0 +1,7 @@
+# Seeds: channels that actually fed Adam suggested traffic (traffic-neighbors-2026-10-10.json).
+# Always scored and kept regardless of sub band. One handle per line.
+lessbitter
+thehypekevin
+Tahaelharti_ai
+darynstrauss
+CGAlchemist

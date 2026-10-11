@@ -17,9 +17,9 @@ Scans your watchlist for new outliers since last run, flags what's NEW, saves a 
 `reports/weekly-YYYY-MM-DD.md`. This is the doctrine's weekly idea-farm ritual, automated.
 Manage the list: `scout watch --add liamottley,MikeyNoCode --niche ai`
 
-**`scout peers [--list ai] [--min-subs 50] [--max-subs 15000] [--n 10] [--cap 120] [--queries FILE]`**
+**`scout peers [--list ai] [--min-subs 1000] [--max-subs 50000] [--n 10] [--cap 120] [--queries FILE]`**
 Finds your PEERS: same-size channels in your lane with outsized returns. Searches the seed terms in
-`peers-queries-<list>.txt` (edit it), keeps channels in the sub band with 3+ long-forms in 90 days and
+`peers-queries-<list>.txt` (edit it), keeps channels in the sub band (default 1K-50K; seeds in `peers-seeds-<list>.txt` always included) with 3+ long-forms in 90 days and
 topical fit, ranks by median video/channel-median plus videos at 5x+ subs, and writes
 `reports/peers-<list>-YYYY-MM-DD.md` with 5 remake-brief CANDIDATES (teardown first, not scripts; briefs
 come from local gemma, title/stats only). Saves the top N to watchlist list `peers-<list>` (never touches
