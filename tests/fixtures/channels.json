@@ -1,0 +1,577 @@
+{
+ "channels": [
+  {
+   "handle": "tinyai",
+   "name": "Tiny AI Lab",
+   "subs": 4000,
+   "videos": [
+    {
+     "id": "vid0001",
+     "title": "Video 1",
+     "views": 3000,
+     "dur": 600,
+     "date": "20260402",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0002",
+     "title": "Video 2",
+     "views": 2500,
+     "dur": 600,
+     "date": "20260409",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0003",
+     "title": "Video 3",
+     "views": 4000,
+     "dur": 600,
+     "date": "20260416",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0004",
+     "title": "Video 4",
+     "views": 3500,
+     "dur": 600,
+     "date": "20260423",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0005",
+     "title": "Video 5",
+     "views": 2800,
+     "dur": 600,
+     "date": "20260502",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0006",
+     "title": "Video 6",
+     "views": 3200,
+     "dur": 600,
+     "date": "20260509",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0007",
+     "title": "Video 7",
+     "views": 2900,
+     "dur": 600,
+     "date": "20260516",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0008",
+     "title": "I replaced my bookkeeper with Claude",
+     "views": 30000,
+     "dur": 600,
+     "date": "20260920",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0009",
+     "title": "Short: one prompt trick",
+     "views": 50000,
+     "dur": 40,
+     "date": "20260910",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0010",
+     "title": "Old evergreen hit",
+     "views": 90000,
+     "dur": 600,
+     "date": "20240105",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    }
+   ]
+  },
+  {
+   "handle": "smallbuild",
+   "name": "Small Build Co",
+   "subs": 9000,
+   "videos": [
+    {
+     "id": "vid0011",
+     "title": "Video 11",
+     "views": 5000,
+     "dur": 600,
+     "date": "20260402",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0012",
+     "title": "Video 12",
+     "views": 6000,
+     "dur": 600,
+     "date": "20260409",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0013",
+     "title": "Video 13",
+     "views": 7000,
+     "dur": 600,
+     "date": "20260416",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0014",
+     "title": "Video 14",
+     "views": 8000,
+     "dur": 600,
+     "date": "20260423",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0015",
+     "title": "Video 15",
+     "views": 5500,
+     "dur": 600,
+     "date": "20260502",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0016",
+     "title": "Video 16",
+     "views": 6500,
+     "dur": 600,
+     "date": "20260509",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0017",
+     "title": "Built an invoice app in one day",
+     "views": 45000,
+     "dur": 600,
+     "date": "20260918",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    }
+   ]
+  },
+  {
+   "handle": "edge10k",
+   "name": "Edge Ten K",
+   "subs": 10000,
+   "videos": [
+    {
+     "id": "vid0018",
+     "title": "Video 18",
+     "views": 4000,
+     "dur": 600,
+     "date": "20260402",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0019",
+     "title": "Video 19",
+     "views": 4200,
+     "dur": 600,
+     "date": "20260409",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0020",
+     "title": "Video 20",
+     "views": 4100,
+     "dur": 600,
+     "date": "20260416",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0021",
+     "title": "Video 21",
+     "views": 3900,
+     "dur": 600,
+     "date": "20260423",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    }
+   ]
+  },
+  {
+   "handle": "midcode",
+   "name": "Mid Code",
+   "subs": 30000,
+   "videos": [
+    {
+     "id": "vid0022",
+     "title": "Video 22",
+     "views": 20000,
+     "dur": 600,
+     "date": "20260402",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0023",
+     "title": "Video 23",
+     "views": 18000,
+     "dur": 600,
+     "date": "20260409",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0024",
+     "title": "Video 24",
+     "views": 22000,
+     "dur": 600,
+     "date": "20260416",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0025",
+     "title": "Video 25",
+     "views": 21000,
+     "dur": 600,
+     "date": "20260423",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0026",
+     "title": "Video 26",
+     "views": 19000,
+     "dur": 600,
+     "date": "20260502",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0027",
+     "title": "Video 27",
+     "views": 20500,
+     "dur": 600,
+     "date": "20260509",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0028",
+     "title": "Cursor vs Claude Code for owners",
+     "views": 160000,
+     "dur": 600,
+     "date": "20260915",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    }
+   ]
+  },
+  {
+   "handle": "facelessfacts",
+   "name": "Faceless Facts",
+   "subs": 20000,
+   "videos": [
+    {
+     "id": "vid0029",
+     "title": "Video 29",
+     "views": 15000,
+     "dur": 600,
+     "date": "20260402",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0030",
+     "title": "Video 30",
+     "views": 16000,
+     "dur": 600,
+     "date": "20260409",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0031",
+     "title": "Video 31",
+     "views": 14000,
+     "dur": 600,
+     "date": "20260416",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0032",
+     "title": "Video 32",
+     "views": 15500,
+     "dur": 600,
+     "date": "20260423",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0033",
+     "title": "10 AI facts that sound fake",
+     "views": 5000000,
+     "dur": 600,
+     "date": "20260815",
+     "likes": null,
+     "comments": null,
+     "desc": "Narrated with ElevenLabs AI voice. New video every hour."
+    },
+    {
+     "id": "vid0034",
+     "title": "AI facts part 2",
+     "views": 15000,
+     "dur": 600,
+     "date": "20260815",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0035",
+     "title": "AI facts part 3",
+     "views": 14500,
+     "dur": 600,
+     "date": "20260815",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    }
+   ]
+  },
+  {
+   "handle": "bigdev",
+   "name": "Big Dev",
+   "subs": 120000,
+   "videos": [
+    {
+     "id": "vid0036",
+     "title": "Video 36",
+     "views": 80000,
+     "dur": 600,
+     "date": "20260402",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0037",
+     "title": "Video 37",
+     "views": 90000,
+     "dur": 600,
+     "date": "20260409",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0038",
+     "title": "Video 38",
+     "views": 85000,
+     "dur": 600,
+     "date": "20260416",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0039",
+     "title": "Video 39",
+     "views": 95000,
+     "dur": 600,
+     "date": "20260423",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0040",
+     "title": "Video 40",
+     "views": 70000,
+     "dur": 600,
+     "date": "20260502",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0041",
+     "title": "The agent setup nobody shows",
+     "views": 600000,
+     "dur": 600,
+     "date": "20260912",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    }
+   ]
+  },
+  {
+   "handle": "deadsubs",
+   "name": "Dead Subs Inc",
+   "subs": 200000,
+   "videos": [
+    {
+     "id": "vid0042",
+     "title": "Video 42",
+     "views": 120,
+     "dur": 600,
+     "date": "20260402",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0043",
+     "title": "Video 43",
+     "views": 90,
+     "dur": 600,
+     "date": "20260409",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0044",
+     "title": "Video 44",
+     "views": 100,
+     "dur": 600,
+     "date": "20260416",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0045",
+     "title": "Video 45",
+     "views": 110,
+     "dur": 600,
+     "date": "20260423",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0046",
+     "title": "Video 46",
+     "views": 400,
+     "dur": 600,
+     "date": "20260502",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    }
+   ]
+  },
+  {
+   "handle": "megachan",
+   "name": "Mega Channel",
+   "subs": 2000000,
+   "videos": [
+    {
+     "id": "vid0047",
+     "title": "Video 47",
+     "views": 900000,
+     "dur": 600,
+     "date": "20260402",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0048",
+     "title": "Video 48",
+     "views": 1100000,
+     "dur": 600,
+     "date": "20260409",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0049",
+     "title": "Video 49",
+     "views": 1000000,
+     "dur": 600,
+     "date": "20260416",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    }
+   ]
+  },
+  {
+   "handle": "nosubs",
+   "name": "Hidden Subs",
+   "subs": null,
+   "videos": [
+    {
+     "id": "vid0050",
+     "title": "Video 50",
+     "views": 1000,
+     "dur": 600,
+     "date": "20260402",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    },
+    {
+     "id": "vid0051",
+     "title": "Video 51",
+     "views": 1200,
+     "dur": 600,
+     "date": "20260409",
+     "likes": 100,
+     "comments": 10,
+     "desc": "Walkthrough of the build."
+    }
+   ]
+  }
+ ]
+}

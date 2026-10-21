@@ -6,7 +6,10 @@ that actually move the needle, grounded in Adam's consensus doctrine.
 Data: yt-dlp (no API key). Brain: local gemma4:12b via ollama (optional). Deps: stdlib only.
 
 Commands:
-  scout outliers <handle> [--vs h1,h2,...] [--min-views N] [--days N] [--top N] [--html]
+  scout outliers <handle> [--vs h1,h2,...] [--min-views N] [--top N] [--html]
+                 [--shorts exclude|include|only] [--since-months 6] [--screen] [--drop-flagged]
+  scout tiers [handles...] [--list L] [--input channels.json] [--tiers 1K-10K,10K-50K,50K-250K] [--json]
+  scout feed "<niche>" | --input tiles.json  [--my-title T] [--my-thumb P] [--tv | --grid yt|tv|ig]
   scout title "<proposed title>" [--ai]
   scout niche "<search query>" [--n N] [--html]
   scout keywords "<seed>" [--expand none|quick|full] [--top N] [--check N] [--n N] [--html]
@@ -103,7 +106,7 @@ def _ydl(url, limit, tolerant=False):
 def channel_dump(handle, limit=30, tolerant=False):
     """Return {name, subs, videos:[{id,title,views,dur,date}]}. Cached 6h."""
     handle = handle.lstrip("@")
-    key = f"chan_{handle}_{limit}"
+    key = f"chan2_{handle}_{limit}"  # chan2: records carry likes/comments/desc for --screen
     cached = _cache_get(key)
     if cached:
         return cached
@@ -122,6 +125,10 @@ def channel_dump(handle, limit=30, tolerant=False):
             "views": e.get("view_count") or 0,
             "dur": e.get("duration") or 0,
             "date": e.get("upload_date"),  # reliable in non-flat mode (YYYYMMDD)
+            # for the fake-outlier screen: None = hidden likes / comments off
+            "likes": e.get("like_count"),
+            "comments": e.get("comment_count"),
+            "desc": (e.get("description") or "")[:600],
         })
     out = {
         "name": info.get("channel") or info.get("uploader") or handle,
@@ -355,12 +362,110 @@ def table(rows, headers):
 EMOJI_RE = re.compile(
     "[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F000-\U0001F0FF\U00002190-\U000021FF\U00002B00-\U00002BFF]")
 
+# ---------- shared filters: Shorts mode, recency, fake-outlier screen ----------
+
+SHORTS_MODES = ("exclude", "include", "only")
+DAYS_PER_MONTH = 30.44
+DEFAULT_SINCE_MONTHS = 6  # outlier commands only look at the last 6 months unless told otherwise
+
+def _now():
+    return time.time()  # one seam so tests can pin "today"
+
+def tag_shorts(vids):
+    """Sets is_short on every record. Unknown duration (0) counts as a Short, same as the old
+    `dur > SHORT_MAX_SEC` long-form filter, so exclude mode keeps exactly what it always kept."""
+    for v in vids:
+        v["is_short"] = (v.get("dur") or 0) <= SHORT_MAX_SEC
+    return vids
+
+def apply_shorts(vids, mode="exclude"):
+    """exclude = long-form only (the historical default), include = everything, only = Shorts only."""
+    tag_shorts(vids)
+    if mode == "include":
+        return list(vids)
+    if mode == "only":
+        return [v for v in vids if v["is_short"]]
+    return [v for v in vids if not v["is_short"]]
+
+def video_age_days(v, now=None):
+    try:
+        return ((now if now is not None else _now()) - time.mktime(time.strptime(v["date"], "%Y%m%d"))) / 86400
+    except Exception:
+        return None
+
+def apply_since(vids, months, now=None):
+    """Keeps videos uploaded in the last `months` months. 0/None turns the filter off.
+    Undated videos are kept: there is nothing to judge them on."""
+    if not months:
+        return list(vids)
+    out = []
+    for v in vids:
+        age = video_age_days(v, now)
+        if age is None or age <= months * DAYS_PER_MONTH:
+            out.append(v)
+    return out
+
+# Fake-outlier screen thresholds. Subs per 1k views: a legit 20x-subs "gold" outlier sits at 50.
+SCREEN_SPK_LOW = 5.0        # under 5 subs per 1k views = views 200x+ subs (bought views, Shorts-feed spill)
+SCREEN_SPK_HIGH = 100000.0  # channel median over 100k = typical video under 1% of subs (bought/dead subs)
+SCREEN_BATCH_MIN = 3        # this many uploads on one day = batch-dumped content
+FACELESS_RE = re.compile(
+    r"\b(ai[- ]?voice(?:d|over)?|ai[- ]generated|ai narrat\w*|narrated by ai|voiced by ai|made with ai|"
+    r"text[- ]to[- ]speech|tts|elevenlabs|invideo|pictory|synthesia|faceless|"
+    r"reddit stor(?:y|ies)|aita|no copyright (?:music|footage)|stock footage)\b", re.I)
+
+def screen_video(v, channel_videos, subs):
+    """Reasons this outlier may be fake or not portable, as short tags. Empty list = clean.
+    `channel_videos` is the channel's full recent list (for the batch-upload count)."""
+    reasons = []
+    views = v.get("views") or 0
+    if subs and views:
+        spk = subs * 1000 / views
+        if spk < SCREEN_SPK_LOW:
+            reasons.append(f"subs/1k {spk:.1f}")
+    ch_views = [x.get("views") or 0 for x in channel_videos if x.get("views")]
+    if subs and ch_views and subs * 1000 / statistics.median(ch_views) > SCREEN_SPK_HIGH:
+        reasons.append("subs>>views")
+    # key present with None = yt-dlp saw the field and it was hidden; key absent = unknown
+    if "likes" in v and v["likes"] is None:
+        reasons.append("likes hidden")
+    if "comments" in v and v["comments"] is None:
+        reasons.append("comments off")
+    if v.get("date"):
+        same_day = sum(1 for x in channel_videos if x.get("date") == v["date"])
+        if same_day >= SCREEN_BATCH_MIN:
+            reasons.append(f"batch x{same_day}")
+    m = FACELESS_RE.search(f"{v.get('title') or ''}\n{v.get('desc') or ''}")
+    if m:
+        reasons.append(f"faceless:{m.group(0).lower()}")
+    return reasons
+
+SCREEN_LEGEND = ("Flags: subs/1k = subscribers per 1k views under 5 (views 200x+ subs: bought views or Shorts spill); "
+                 "subs>>views = channel's typical video under 1% of subs (bought/dead subs, median is suspect); "
+                 "likes hidden; comments off; batch xN = N uploads the same day; faceless:<term> = AI-voice/faceless "
+                 "pattern in title/description. A flag is a reason to look, not a verdict.")
+
+def _add_shared_filters(parser, since_default=DEFAULT_SINCE_MONTHS, screen=False):
+    parser.add_argument("--shorts", choices=SHORTS_MODES, default="exclude",
+                        help="Shorts (<=60s): exclude (default, long-form only), include, or only")
+    parser.add_argument("--since-months", type=float, default=since_default,
+                        help=f"only videos uploaded in the last N months, 0 = no limit (default {since_default})")
+    if screen:
+        parser.add_argument("--screen", action="store_true",
+                            help="flag suspicious outliers (fake views/subs, hidden likes, batch uploads, AI-voice/faceless)")
+        parser.add_argument("--drop-flagged", action="store_true", help="drop flagged rows (implies --screen)")
+
 # ---------- Command: outliers (the crown jewel) ----------
 
 def cmd_outliers(args):
     handles = [args.handle] + (args.vs.split(",") if args.vs else [])
     handles = [h.strip().lstrip("@") for h in handles if h.strip()]
     print(f"\n\033[1mOUTLIER FINDER\033[0m  (view-to-subscriber ratio = the #1 idea-validation signal, 6 corpora agree)\n")
+    shorts = getattr(args, "shorts", "exclude")
+    since = getattr(args, "since_months", DEFAULT_SINCE_MONTHS)
+    drop = getattr(args, "drop_flagged", False)
+    screen = getattr(args, "screen", False) or drop
+    kind = {"exclude": "long-form videos", "include": "videos", "only": "Shorts"}[shorts]
     all_rows = []
     html_rows = []
     for h in handles:
@@ -369,9 +474,10 @@ def cmd_outliers(args):
             print(f"  ! {h}: {ch['error']}")
             continue
         subs = ch.get("subs") or 0
-        vids = [v for v in ch["videos"] if v["dur"] > SHORT_MAX_SEC and v["views"] >= args.min_views]
+        vids = [v for v in apply_since(apply_shorts(ch["videos"], shorts), since) if v["views"] >= args.min_views]
         if not vids:
-            print(f"  ! {h}: no long-form videos above {args.min_views} views")
+            window = f" in the last {since:g} months" if since else ""
+            print(f"  ! {h}: no {kind} above {args.min_views} views{window}")
             continue
         med = statistics.median([v["views"] for v in vids]) or 1
         for v in vids:
@@ -380,9 +486,16 @@ def cmd_outliers(args):
             # two multipliers the doctrine names:
             v["vsr"] = round(v["views"] / subs, 2) if subs else None   # view-to-subscriber (AmplifyViews)
             v["osc"] = round(v["views"] / med, 2)                       # outlier score vs channel median (vidIQ/One10)
+            if screen:
+                v["flags"] = screen_video(v, ch["videos"], subs)
         all_rows.extend(vids)
+    dropped = 0
+    if drop:
+        dropped = sum(1 for v in all_rows if v["flags"])
+        all_rows = [v for v in all_rows if not v["flags"]]
     if not all_rows:
-        print("  No data. Check the handles (use the exact @handle).")
+        print("  No data. Check the handles (use the exact @handle)." if not dropped
+              else f"  All {dropped} rows were flagged and dropped (--drop-flagged).")
         return
     # rank: prefer view-to-sub where available, else outlier score
     rpm = real_rpm(args.niche, getattr(args, "rpm", None))
@@ -391,11 +504,27 @@ def cmd_outliers(args):
     for v in ranked:
         vsr = f"{v['vsr']}x" if v["vsr"] is not None else "—"
         v["rev"] = est_rev(v["views"], rpm, v["dur"])
-        rows.append([vsr, f"{v['osc']}x", human(v["views"]), money(v["rev"]),
-                     human(v["subs"]), v["ch"][:15], v["title"][:52]])
+        row = [vsr, f"{v['osc']}x", human(v["views"]), money(v["rev"]),
+               human(v["subs"]), v["ch"][:15], v["title"][:52]]
+        if shorts == "include":
+            row.insert(0, "S" if v["is_short"] else "")
+        if screen:
+            row.append(", ".join(v["flags"]) or "ok")
+        rows.append(row)
         html_rows.append(v)
-    print(table(rows, ["V/Sub", "vsMed", "Views", "Est$", "Subs", "Channel", "Title"]))
+    headers = ["V/Sub", "vsMed", "Views", "Est$", "Subs", "Channel", "Title"]
+    if shorts == "include":
+        headers.insert(0, "Short")
+    if screen:
+        headers.append("Flags")
+    print(table(rows, headers))
     print(f"\n  V/Sub = views ÷ subscribers (5x+ strong, 20x gold — AmplifyViews).  vsMed = views ÷ channel median (3x+ = vidIQ outlier).")
+    if since:
+        print(f"  Window: uploads in the last {since:g} months (--since-months 0 for all). Shorts: {shorts}.")
+    if screen:
+        print(f"  {SCREEN_LEGEND}")
+        if dropped:
+            print(f"  Dropped {dropped} flagged {'row' if dropped == 1 else 'rows'} (--drop-flagged).")
     print(f"  Est$ = est. AdSense at ${rpm:.0f} RPM ({args.niche or 'default'} niche) — the FLOOR. Owned products earn far more (doctrine).")
     print(f"  These titles are PROVEN ideas. Port the concept into your niche (Niche Comparison Theory).\n")
 
@@ -410,21 +539,23 @@ def cmd_outliers(args):
         print("  " + ollama(prompt).replace("\n", "\n  ") + "\n")
 
     if args.html:
-        write_outlier_html(handles, html_rows)
+        write_outlier_html(handles, html_rows, screen)
 
-def write_outlier_html(handles, vids):
+def write_outlier_html(handles, vids, screen=False):
     path = os.path.join(REPORT_DIR, "outliers.html")
+    flag_td = lambda v: f"<td>{html.escape(', '.join(v.get('flags') or []) or 'ok')}</td>" if screen else ""
     rows = "".join(
         f"<tr><td>{v['vsr'] or '—'}x</td><td>{v['osc']}x</td><td>{human(v['views'])}</td>"
         f"<td>{human(v['subs'])}</td><td>{html.escape(v['ch'])}</td>"
-        f"<td><a href='https://youtu.be/{v['id']}'>{html.escape(v['title'])}</a></td></tr>"
+        f"<td><a href='https://youtu.be/{v['id']}'>{html.escape(v['title'])}</a></td>{flag_td(v)}</tr>"
         for v in vids)
+    flag_th = "<th>Flags</th>" if screen else ""
     doc = f"""<!doctype html><meta charset=utf-8><title>ytscout outliers</title>
 <style>body{{font:15px/1.5 -apple-system,system-ui,sans-serif;max-width:1000px;margin:2rem auto;padding:0 1rem}}
 h1{{font-size:1.4rem}}table{{border-collapse:collapse;width:100%}}td,th{{padding:.4rem .6rem;border-bottom:1px solid #ddd;text-align:left}}
 th{{font-size:.8rem;text-transform:uppercase;color:#666}}a{{color:#0645ad;text-decoration:none}}</style>
 <h1>Outlier finder</h1><p>Channels: {html.escape(', '.join(handles))}. V/Sub = views ÷ subscribers (5x+ strong, 20x gold). vsMed = views ÷ channel median (3x+ = outlier).</p>
-<table><tr><th>V/Sub</th><th>vs Median</th><th>Views</th><th>Subs</th><th>Channel</th><th>Title</th></tr>{rows}</table>"""
+<table><tr><th>V/Sub</th><th>vs Median</th><th>Views</th><th>Subs</th><th>Channel</th><th>Title</th>{flag_th}</tr>{rows}</table>"""
     open(path, "w").write(doc)
     print(f"  → HTML report: {path}")
 
@@ -509,9 +640,10 @@ def cmd_niche(args):
     d = search_dump(args.query, args.n)
     if d.get("error"):
         print("  ! " + d["error"]); return
-    res = [r for r in d["results"] if r["dur"] > SHORT_MAX_SEC]
+    res = apply_shorts(d["results"], getattr(args, "shorts", "exclude"))
     if not res:
-        print("  No long-form results."); return
+        print("  No results for this Shorts mode." if getattr(args, "shorts", "exclude") != "exclude"
+              else "  No long-form results."); return
     views = sorted([r["views"] for r in res], reverse=True)
     total = sum(views) or 1
     top3_share = sum(views[:3]) / total
@@ -628,48 +760,65 @@ def _b64_img(path):
     except Exception:
         return None
 
-def cmd_feed(args):
-    d = search_dump(args.query, args.n)
-    if d.get("error"):
-        print("  ! " + d["error"]); return
-    vids = [v for v in d["results"] if v["dur"] > SHORT_MAX_SEC][:args.n]
-    if not vids:
-        print("  No results."); return
+def _fmt_dur(d):
+    """Seconds -> '12:34' / '1:02:03'. Strings pass through ('12:34'), anything else -> ''."""
+    if isinstance(d, (int, float)) and d > 0:
+        d = int(d)
+        h, m, s = d // 3600, d % 3600 // 60, d % 60
+        return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+    return d if isinstance(d, str) else ""
 
-    # Adam's card
-    my_thumb = _b64_img(args.my_thumb) if args.my_thumb else None
-    my = {
-        "title": args.my_title or "[your proposed title here]",
-        "channel": "Your Channel",
-        "views_str": "NEW",
-        "thumb": my_thumb,  # data URI or None -> placeholder
-        "mine": True,
-    }
-    cards = []
-    for v in vids:
-        cards.append({
-            "title": v["title"],
-            "channel": v["channel"],
-            "views_str": _yt_views(v["views"]),
-            "thumb": f"https://i.ytimg.com/vi/{v['id']}/hqdefault.jpg",
-            "mine": False,
-        })
-    pos = max(0, min(len(cards), args.pos))
-    cards.insert(pos, my)
+_SAFE_SRC_RE = re.compile(r"^(https?://|data:image/)", re.I)
 
+def _feed_src(thumb, base_dir="."):
+    """Image source for a tile. http(s) and data:image pass through; a local path is embedded
+    as base64 so the HTML stays self-contained; anything else (javascript:, a missing file)
+    returns None and renders as a placeholder."""
+    if not thumb or not isinstance(thumb, str):
+        return None
+    if _SAFE_SRC_RE.match(thumb):
+        return thumb
+    p = thumb if os.path.isabs(thumb) else os.path.join(base_dir, thumb)
+    return _b64_img(p) if os.path.isfile(p) else None
+
+def _feed_card(t, base_dir=".", mine=False):
+    views = t.get("views")
+    return {"title": str(t.get("title") or ""), "channel": str(t.get("channel") or ""),
+            "views_str": str(t.get("views_str") or (_yt_views(views) if isinstance(views, (int, float)) else "")),
+            "age": str(t.get("age") or ""), "dur": _fmt_dur(t.get("dur")),
+            "thumb": _feed_src(t.get("thumb"), base_dir), "carousel": bool(t.get("carousel")), "mine": mine}
+
+def load_feed_json(path):
+    """Competitor tiles from JSON: a bare list of tiles, or
+    {"label", "profile": {...ig header...}, "candidate": {tile}, "tiles": [tile, ...]}.
+    Tile keys: title, channel, views (int) or views_str, age, dur (seconds or "12:34"),
+    thumb (URL, or a path relative to the JSON file), carousel (ig grid icon).
+    Returns (cards, candidate_or_None, label, profile)."""
+    data = json.load(open(path, encoding="utf-8"))
+    base = os.path.dirname(os.path.abspath(path))
+    meta = data if isinstance(data, dict) else {"tiles": data}
+    cards = [_feed_card(t, base) for t in (meta.get("tiles") or []) if isinstance(t, dict)]
+    cand = meta.get("candidate")
+    cand = _feed_card(cand, base, mine=True) if isinstance(cand, dict) else None
+    return cards, cand, meta.get("label"), meta.get("profile") or {}
+
+def _feed_sub(c):
+    return " · ".join(html.escape(x) for x in (c["channel"], c["views_str"], c.get("age") or "") if x)
+
+def _feed_yt_html(cards, label):
     def card_html(c):
         cls = "card mine" if c.get("mine") else "card"
         if c["thumb"]:
-            thumb = f"<img class=thumb src='{c['thumb']}' alt=''>"
+            thumb = f"<img class=thumb src='{html.escape(c['thumb'], quote=True)}' alt=''>"
         else:
             thumb = f"<div class='thumb ph'>{html.escape(c['title'][:40])}</div>"
         badge = "<span class=badge>YOU</span>" if c.get("mine") else ""
         return (f"<div class='{cls}'>{thumb}{badge}"
                 f"<div class=meta><div class=title>{html.escape(c['title'])}</div>"
-                f"<div class=sub>{html.escape(c['channel'])} · {c['views_str']}</div></div></div>")
+                f"<div class=sub>{_feed_sub(c)}</div></div></div>")
 
     grid = "".join(card_html(c) for c in cards)
-    doc = f"""<!doctype html><meta charset=utf-8><title>ytscout feed — {html.escape(args.query)}</title>
+    return f"""<!doctype html><meta charset=utf-8><title>ytscout feed — {html.escape(label)}</title>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <style>
 :root{{--bg:#0f0f0f;--fg:#f1f1f1;--sub:#aaa}}
@@ -688,15 +837,167 @@ header{{padding:14px 20px;font-size:15px;color:var(--sub);border-bottom:1px soli
 .badge{{position:absolute;top:8px;left:8px;background:#3ea6ff;color:#001;font-weight:700;
   font-size:11px;padding:2px 7px;border-radius:4px;letter-spacing:.5px}}
 </style>
-<header>Test feed · niche: <b>{html.escape(args.query)}</b> · your card is outlined in blue. Does your packaging stop the scroll?</header>
+<header>Test feed · niche: <b>{html.escape(label)}</b> · your card is outlined in blue. Does your packaging stop the scroll?</header>
 <div class=grid>{grid}</div>"""
-    path = os.path.join(REPORT_DIR, "feed.html")
-    open(path, "w").write(doc)
-    print(f"\n\033[1mTEST FEED\033[0m built with {len(vids)} real '{args.query}' videos + your card at position {pos+1}.")
-    print(f"  → {path}")
+
+# TV home: sized in vw so a laptop window reads like a 1080p TV at couch distance.
+_FEED_TV_CSS = """
+:root{--bg:#0f0f0f;--fg:#f1f1f1;--sub:#aaa;--chip:#272727;--blue:#3ea6ff}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--fg);font-family:Roboto,-apple-system,system-ui,sans-serif;overflow-x:hidden}
+.tv{display:grid;grid-template-columns:7vw 1fr;min-height:100vh}
+.rail{display:flex;flex-direction:column;align-items:center;gap:2.4vw;padding-top:2.4vw;color:var(--sub);font-size:.8vw}
+.logo{width:2.6vw;height:1.85vw;background:#f00;border-radius:.5vw;position:relative;margin-bottom:1vw}
+.logo::after{content:"";position:absolute;left:1.05vw;top:.55vw;border-left:.75vw solid #fff;border-top:.38vw solid transparent;border-bottom:.38vw solid transparent}
+.nav{display:flex;flex-direction:column;align-items:center;gap:.45vw}
+.nav i{width:1.9vw;height:1.9vw;border-radius:50%;border:.17vw solid currentColor;display:block}
+.nav.on{color:var(--fg)}.nav.on i{background:var(--fg)}
+.main{padding:2.4vw 3vw 4vw 1vw}
+.chips{display:flex;gap:.9vw;margin-bottom:2.2vw}
+.chip{background:var(--chip);border-radius:.6vw;padding:.6vw 1.2vw;font-size:1.1vw;font-weight:500;white-space:nowrap}
+.chip.on{background:var(--fg);color:var(--bg)}
+.grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:2.6vw 1.5vw}
+.tw{position:relative;aspect-ratio:16/9;border-radius:.8vw;overflow:hidden;background:#222}
+.tw img,.tw .ph{width:100%;height:100%;object-fit:cover}
+.tw img{display:block}
+.ph{display:flex;align-items:center;justify-content:center;text-align:center;padding:1vw;
+  background:linear-gradient(135deg,#3a3a3a,#555);font-weight:700;font-size:1.15vw;color:#ddd}
+.dur{position:absolute;right:.5vw;bottom:.5vw;background:rgba(0,0,0,.8);font-size:.9vw;font-weight:600;padding:.1vw .45vw;border-radius:.3vw}
+.t{font-size:1.3vw;font-weight:500;line-height:1.3;margin-top:1vw;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.s{font-size:1.02vw;color:var(--sub);margin-top:.4vw;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.focus{transform:scale(1.05);transform-origin:center top}
+.focus .tw{outline:.32vw solid #fff;outline-offset:.28vw}
+.mine .tw{box-shadow:0 0 0 .32vw var(--blue)}
+.badge{position:absolute;top:.5vw;left:.5vw;background:var(--blue);color:#001;font-weight:700;font-size:.85vw;padding:.1vw .5vw;border-radius:.3vw}
+.foot{color:#666;font-size:.9vw;margin-top:3vw}
+"""
+
+def _feed_tv_html(cards, label):
+    def tile(c, focus):
+        cls = "tile" + (" mine" if c.get("mine") else "") + (" focus" if focus else "")
+        img = (f"<img src='{html.escape(c['thumb'], quote=True)}' alt=''>" if c["thumb"]
+               else f"<div class=ph>{html.escape(c['title'][:60])}</div>")
+        dur = f"<span class=dur>{html.escape(c['dur'])}</span>" if c.get("dur") else ""
+        badge = "<span class=badge>YOU</span>" if c.get("mine") else ""
+        return (f"<div class='{cls}'><div class=tw>{img}{dur}{badge}</div>"
+                f"<div class=t>{html.escape(c['title'])}</div><div class=s>{_feed_sub(c)}</div></div>")
+    tiles = "".join(tile(c, i == 0) for i, c in enumerate(cards))
+    nav = "".join(f"<div class='nav{' on' if n == 'Home' else ''}'><i></i>{n}</div>"
+                  for n in ("Search", "Home", "Shorts", "Subscriptions", "Library"))
+    chips = "".join(f"<span class='chip{' on' if i == 0 else ''}'>{html.escape(n)}</span>"
+                    for i, n in enumerate(["All", label, "Podcasts", "Live", "Recently uploaded", "New to you"]))
+    return f"""<!doctype html><meta charset=utf-8><title>ytscout TV feed — {html.escape(label)}</title>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<style>{_FEED_TV_CSS}</style>
+<div class=tv><nav class=rail><div class=logo></div>{nav}</nav>
+<main class=main><div class=chips>{chips}</div><div class=grid>{tiles}</div>
+<div class=foot>ytscout TV home mock · niche: {html.escape(label)} · your tile is ringed in blue. Judge it from across the room.</div></main></div>"""
+
+_FEED_IG_CSS = """
+:root{--bg:#000;--fg:#f5f5f5;--sub:#a8a8a8;--line:#262626;--cell:#1a1a1a;--blue:#0095f6}
+@media(prefers-color-scheme:light){:root{--bg:#fff;--fg:#000;--sub:#737373;--line:#dbdbdb;--cell:#efefef}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.4 -apple-system,system-ui,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:935px;margin:0 auto;padding:30px 16px 40px}
+.prof{display:flex;gap:7%;align-items:center;padding:0 5% 40px;border-bottom:1px solid var(--line)}
+.av{width:150px;height:150px;border-radius:50%;flex:0 0 auto;padding:4px;
+  background:conic-gradient(#feda75,#fa7e1e,#d62976,#962fbf,#4f5bd5,#feda75)}
+.av i{display:block;width:100%;height:100%;border-radius:50%;background:#444;border:4px solid var(--bg)}
+.handle{font-size:20px}
+.stats{display:flex;gap:36px;margin:18px 0;font-size:16px}
+.bio{white-space:pre-line}
+.tabs{display:flex;justify-content:center;gap:60px;font-size:12px;font-weight:600;letter-spacing:1px;color:var(--sub)}
+.tabs span{padding:16px 0}.tabs .on{color:var(--fg);border-top:1px solid var(--fg);margin-top:-1px}
+.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px}
+.cell{position:relative;aspect-ratio:4/5;background:var(--cell);overflow:hidden}
+.cell img,.cell .ph{width:100%;height:100%;object-fit:cover}
+.cell img{display:block}
+.ph{display:flex;align-items:center;justify-content:center;text-align:center;padding:28px;font-weight:700;font-size:15px;
+  color:#ddd;background:linear-gradient(160deg,#3a3a3a,#5a5a5a)}
+.multi{position:absolute;top:12px;right:14px;width:15px;height:15px;border:2px solid #fff;border-radius:3px;
+  filter:drop-shadow(0 0 2px rgba(0,0,0,.6))}
+.multi::after{content:"";position:absolute;top:-6px;right:-6px;width:15px;height:15px;border-top:2px solid #fff;border-right:2px solid #fff;border-radius:0 3px 0 0}
+.mine{outline:3px solid var(--blue);outline-offset:-3px}
+.badge{position:absolute;top:8px;left:8px;background:var(--blue);color:#fff;font-weight:700;font-size:11px;padding:2px 7px;border-radius:4px}
+.foot{color:var(--sub);font-size:12px;margin-top:16px}
+@media(max-width:735px){.av{width:77px;height:77px}.prof{padding:0 0 24px}.stats{gap:18px;font-size:14px}.grid{gap:2px}}
+"""
+
+def _feed_ig_html(cards, label, profile=None):
+    p = profile or {}
+    def cell(c):
+        img = (f"<img src='{html.escape(c['thumb'], quote=True)}' alt=''>" if c["thumb"]
+               else f"<div class=ph>{html.escape(c['title'][:80])}</div>")
+        multi = "<span class=multi></span>" if c.get("carousel") else ""
+        badge = "<span class=badge>YOU</span>" if c.get("mine") else ""
+        return f"<div class='cell{' mine' if c.get('mine') else ''}' title='{html.escape(c['title'], quote=True)}'>{img}{multi}{badge}</div>"
+    cells = "".join(cell(c) for c in cards)
+    handle = html.escape(str(p.get("handle") or "yourhandle"))
+    stat = lambda k, d: html.escape(str(p.get(k, d)))
+    return f"""<!doctype html><meta charset=utf-8><title>ytscout grid — {html.escape(label)}</title>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<style>{_FEED_IG_CSS}</style>
+<div class=wrap>
+<header class=prof><div class=av><i></i></div><div>
+<div class=handle>{handle}</div>
+<div class=stats><span><b>{stat('posts', len(cards))}</b> posts</span><span><b>{stat('followers', '1,204')}</b> followers</span><span><b>{stat('following', '318')}</b> following</span></div>
+<div class=bio>{html.escape(str(p.get("bio") or label))}</div></div></header>
+<div class=tabs><span class=on>POSTS</span><span>REELS</span><span>TAGGED</span></div>
+<div class=grid>{cells}</div>
+<div class=foot>ytscout 4:5 grid mock (Instagram / Facebook) · {html.escape(label)} · your cover is outlined in blue. Does it hold its own at thumbnail size?</div>
+</div>"""
+
+FEED_GRIDS = ("yt", "tv", "ig")
+
+def cmd_feed(args):
+    grid = "tv" if getattr(args, "tv", False) else (getattr(args, "grid", None) or "yt")
+    cand, profile = None, {}
+    if getattr(args, "input", None):
+        try:
+            cards, cand, label, profile = load_feed_json(args.input)
+        except (OSError, ValueError) as e:
+            print(f"  ! could not read {args.input}: {e}"); return
+        label = args.query or label or os.path.basename(args.input)
+        source = f"{len(cards)} tiles from {args.input}"
+    else:
+        if not args.query:
+            print("  ! give a niche/search query, or --input tiles.json"); return
+        d = search_dump(args.query, args.n)
+        if d.get("error"):
+            print("  ! " + d["error"]); return
+        vids = [v for v in d["results"] if v["dur"] > SHORT_MAX_SEC][:args.n]
+        cards = [{"title": v["title"], "channel": v["channel"], "views_str": _yt_views(v["views"]), "age": "",
+                  "dur": _fmt_dur(v["dur"]), "thumb": f"https://i.ytimg.com/vi/{v['id']}/hqdefault.jpg",
+                  "carousel": False, "mine": False} for v in vids]
+        label = args.query
+        source = f"{len(vids)} real '{args.query}' videos"
+    if not cards:
+        print("  No results."); return
+
+    # Adam's card: CLI flags beat the JSON candidate
+    my = cand or _feed_card({}, mine=True)
+    my["title"] = args.my_title or my["title"] or "[your proposed title here]"
+    my["channel"] = my["channel"] or "Your Channel"
+    my["views_str"] = my["views_str"] or "NEW"
+    if args.my_thumb:
+        my["thumb"] = _b64_img(args.my_thumb)  # data URI or None -> placeholder
+    pos = max(0, min(len(cards), args.pos))
+    cards.insert(pos, my)
+
+    paths = [os.path.join(REPORT_DIR, "feed.html")]
+    open(paths[0], "w", encoding="utf-8").write(_feed_yt_html(cards, label))
+    if grid == "tv":
+        paths.append(os.path.join(REPORT_DIR, "feed-tv.html"))
+        open(paths[-1], "w", encoding="utf-8").write(_feed_tv_html(cards, label))
+    elif grid == "ig":
+        paths.append(os.path.join(REPORT_DIR, "feed-ig.html"))
+        open(paths[-1], "w", encoding="utf-8").write(_feed_ig_html(cards, label, profile))
+    print(f"\n\033[1mTEST FEED\033[0m built with {source} + your card at position {pos+1}.")
+    for p in paths:
+        print(f"  → {p}")
     print(f"  Open it and ask: does YOUR thumbnail/title pull the eye, or blend in? (thumbsup.tv-style preview, doctrine's pre-upload gate)\n")
     if args.open:
-        os.system(f"open '{path}' 2>/dev/null")
+        os.system(f"open '{paths[-1]}' 2>/dev/null")
 
 # ---------- Command: studio (visual GUI: title+thumb vs live YouTube + audience panel) ----------
 
@@ -1080,7 +1381,11 @@ def cmd_weekly(args):
         if ch.get("error"):
             print(f"  ! {h}: {ch['error']}"); continue
         subs = ch.get("subs") or 0
-        vids = [v for v in ch["videos"] if v["dur"] > SHORT_MAX_SEC and v["views"] >= args.min_views]
+        vids = apply_since(apply_shorts(ch["videos"], getattr(args, "shorts", "exclude")),
+                           getattr(args, "since_months", DEFAULT_SINCE_MONTHS))
+        vids = [v for v in vids if v["views"] >= args.min_views]
+        if not vids:
+            continue
         med = statistics.median([v["views"] for v in vids]) or 1
         for v in vids:
             v["ch"] = ch["name"]; v["subs"] = subs
@@ -1386,6 +1691,151 @@ def cmd_peers(args):
         data["lists"][f"peers-{listname}"] = {"handles": [p["handle"] for p in top], "niche": listname}
         json.dump(data, open(WATCHLIST, "w"), indent=2)
         print(f"  → Saved {len(top)} handles to watchlist list 'peers-{listname}' (run: scout weekly --list peers-{listname})\n")
+
+# ---------- Command: tiers (3-tier small-channel study) ----------
+
+DEFAULT_TIERS = "1K-10K,10K-50K,50K-250K"
+
+def _parse_count(s):
+    """'10K' -> 10000, '2.5M' -> 2500000, '1000' -> 1000."""
+    s = s.strip().upper().replace(",", "").replace("_", "")
+    mult = {"K": 1_000, "M": 1_000_000}.get(s[-1:], 1)
+    return int(float(s[:-1] if mult > 1 else s) * mult)
+
+def parse_tiers(spec):
+    """'1K-10K,10K-50K' -> [(1000, 10000), (10000, 50000)]. Lower bound inclusive, upper exclusive."""
+    tiers = []
+    for part in spec.split(","):
+        if not part.strip():
+            continue
+        lo, hi = part.split("-", 1)
+        lo, hi = _parse_count(lo), _parse_count(hi)
+        if hi <= lo:
+            raise ValueError(f"tier {part.strip()!r}: upper bound must be above lower bound")
+        tiers.append((lo, hi))
+    return tiers
+
+def _short_count(n):
+    for unit, div in (("M", 1_000_000), ("K", 1_000)):
+        if n >= div:
+            return f"{n/div:g}{unit}"
+    return str(n)
+
+def tiers_study(channels, tiers, top=5, shorts="exclude", since_months=DEFAULT_SINCE_MONTHS,
+                min_views=0, screen=False, drop_flagged=False, now=None):
+    """Buckets channels by subscriber count and finds each tier's outliers.
+    channels: [{"handle", "name", "subs", "videos": [...]}] (channel_dump shape plus a handle).
+    Outlier multiple = video views / that channel's median views (over the same filtered set).
+    Returns {"tiers": [...], "unbucketed": [...], "params": {...}}; plain data, JSON-safe."""
+    screen = screen or drop_flagged
+    out_tiers = []
+    placed = set()
+    for lo, hi in tiers:
+        members, all_views, ch_meds, cand = [], [], [], []
+        dropped = 0
+        for c in channels:
+            subs = c.get("subs")
+            if subs is None or not (lo <= subs < hi):
+                continue
+            placed.add(id(c))
+            vids = apply_since(apply_shorts([dict(v) for v in c.get("videos") or []], shorts), since_months, now)
+            vids = [v for v in vids if (v.get("views") or 0) >= min_views]
+            if not vids:
+                continue
+            med = statistics.median([v["views"] for v in vids]) or 1
+            name = c.get("name") or c.get("handle") or "?"
+            members.append(name)
+            ch_meds.append(med)
+            for v in vids:
+                all_views.append(v["views"])
+                row = {"channel": name, "handle": c.get("handle"), "subs": subs, "id": v.get("id"),
+                       "title": v.get("title") or "", "views": v["views"], "date": v.get("date"),
+                       "is_short": v["is_short"], "channel_median": med, "mult": round(v["views"] / med, 2)}
+                if screen:
+                    row["flags"] = screen_video(v, c.get("videos") or [], subs)
+                    if drop_flagged and row["flags"]:
+                        dropped += 1
+                        continue
+                cand.append(row)
+        cand.sort(key=lambda r: (r["mult"], r["views"]), reverse=True)
+        out_tiers.append({
+            "tier": f"{_short_count(lo)}-{_short_count(hi)}", "min_subs": lo, "max_subs": hi,
+            "channels": len(members), "channel_names": members, "videos": len(all_views),
+            "median_views": statistics.median(all_views) if all_views else None,
+            "median_channel_median": statistics.median(ch_meds) if ch_meds else None,
+            "dropped_flagged": dropped, "top": cand[:top],
+        })
+    unbucketed = [{"channel": c.get("name") or c.get("handle") or "?", "subs": c.get("subs")}
+                  for c in channels if id(c) not in placed]
+    return {"tiers": out_tiers, "unbucketed": unbucketed,
+            "params": {"shorts": shorts, "since_months": since_months, "min_views": min_views,
+                       "top": top, "screen": screen, "drop_flagged": drop_flagged}}
+
+def load_channels_json(path):
+    """Offline channel data: a list of channels, or {"channels": [...]}, in channel_dump shape."""
+    data = json.load(open(path, encoding="utf-8"))
+    chans = data.get("channels", []) if isinstance(data, dict) else data
+    return [c for c in chans if isinstance(c, dict)]
+
+def cmd_tiers(args):
+    try:
+        tiers = parse_tiers(args.tiers)
+    except ValueError as e:
+        print(f"  ! --tiers: {e}"); return
+    if args.input:
+        try:
+            channels = load_channels_json(args.input)
+        except (OSError, ValueError) as e:
+            print(f"  ! could not read {args.input}: {e}"); return
+    else:
+        handles = [h.strip().lstrip("@") for h in args.handles if h.strip()]
+        if args.list or not handles:
+            name, lst = _active_list(load_watchlist(), args.list)
+            handles += [h for h in lst.get("handles", []) if h not in handles]
+        if not handles:
+            print("\n  No channels. Pass handles, --list <watchlist>, or --input channels.json\n"); return
+        channels = []
+        for h in handles:
+            ch = channel_dump(h, limit=args.scan)
+            if ch.get("error"):
+                sys.stderr.write(f"  ! {h}: {ch['error'][:80]}\n"); continue
+            channels.append(dict(ch, handle=h))
+    res = tiers_study(channels, tiers, top=args.top, shorts=args.shorts, since_months=args.since_months,
+                      min_views=args.min_views, screen=args.screen, drop_flagged=args.drop_flagged)
+    if args.json:
+        print(json.dumps(res, indent=2))
+        return
+    print(f"\n\033[1mTIER STUDY\033[0m  {len(channels)} channels, {len(tiers)} tiers by subscriber count\n")
+    summary = []
+    for t in res["tiers"]:
+        best = t["top"][0]["mult"] if t["top"] else None
+        hm = lambda n: human(n) if n is not None else "-"
+        summary.append([t["tier"], t["channels"], t["videos"], hm(t["median_views"]),
+                        hm(t["median_channel_median"]), f"{best}x" if best is not None else "-"])
+    print(table(summary, ["Tier", "Channels", "Videos", "MedViews", "MedChanMed", "TopMult"]))
+    for t in res["tiers"]:
+        print(f"\n  \033[1m{t['tier']} subs\033[0m  top {len(t['top'])} outliers")
+        if not t["top"]:
+            print("  (no eligible videos in this tier)")
+            continue
+        rows = []
+        for r in t["top"]:
+            row = [f"{r['mult']}x", human(r["views"]), human(r["subs"]), r["channel"][:16], r["title"][:52]]
+            if args.screen or args.drop_flagged:
+                row.append(", ".join(r["flags"]) or "ok")
+            rows.append(row)
+        headers = ["Mult", "Views", "Subs", "Channel", "Title"] + (["Flags"] if args.screen or args.drop_flagged else [])
+        print("  " + table(rows, headers).replace("\n", "\n  "))
+        if t["dropped_flagged"]:
+            print(f"  dropped {t['dropped_flagged']} flagged (--drop-flagged)")
+    if res["unbucketed"]:
+        print(f"\n  Outside every tier: " + ", ".join(f"{u['channel']} ({human(u['subs'])})" for u in res["unbucketed"]))
+    window = f"last {args.since_months:g} months" if args.since_months else "all uploads"
+    print(f"\n  Mult = video views ÷ that channel's median ({window}, Shorts: {args.shorts}). MedViews = median of every")
+    print(f"  video in the tier; MedChanMed = median of the channels' medians. Tiers are lower-bound inclusive.")
+    if args.screen or args.drop_flagged:
+        print(f"  {SCREEN_LEGEND}")
+    print()
 
 # ---------- Command: dash (offline HTML assembly, zero AI, zero network by default) ----------
 # Pure read/render layer. Nothing below may import yt_dlp or call ollama/_ydl/_fetch_json/
@@ -1892,7 +2342,8 @@ def _write_dash_html(data, path=None):
 def cmd_dash(args):
     if getattr(args, "refresh", False):
         print("  --refresh passed: running a live weekly scan first (this needs network)...")
-        cmd_weekly(argparse.Namespace(scan=15, min_views=1000, niche=None, rpm=None, list=args.list, top=25))
+        cmd_weekly(argparse.Namespace(scan=15, min_views=1000, niche=None, rpm=None, list=args.list, top=25,
+                                      shorts="exclude", since_months=DEFAULT_SINCE_MONTHS))
 
     data = _dash_collect()
     path = _write_dash_html(data)
@@ -2071,7 +2522,7 @@ def cmd_config(args):
 
 # ---------- CLI ----------
 
-def main():
+def build_parser():
     p = argparse.ArgumentParser(prog="scout", description="Free local vidIQ/TubeBuddy, grounded in the consensus doctrine.")
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -2085,10 +2536,15 @@ def main():
     o.add_argument("--top", type=int, default=20)
     o.add_argument("--ai", action="store_true", help="use gemma to port the top outlier into your niches")
     o.add_argument("--html", action="store_true")
+    _add_shared_filters(o, screen=True)
     o.set_defaults(func=cmd_outliers)
 
     f = sub.add_parser("feed", help="render your title+thumbnail among REAL niche videos (thumbsup.tv-style)")
-    f.add_argument("query", help="the niche/search to build the feed from")
+    f.add_argument("query", nargs="?", default="", help="the niche/search to build the feed from (optional with --input)")
+    f.add_argument("--input", default=None, help="competitor tiles JSON instead of a live search (offline)")
+    f.add_argument("--grid", choices=FEED_GRIDS, default="yt",
+                   help="extra mock to render next to feed.html: tv (YouTube TV home, 5-across) or ig (4:5, 3-across)")
+    f.add_argument("--tv", action="store_true", help="shortcut for --grid tv")
     f.add_argument("--my-title", default="", help="your proposed title")
     f.add_argument("--my-thumb", default="", help="path to your proposed thumbnail image")
     f.add_argument("--pos", type=int, default=3, help="where to place your card (0-based)")
@@ -2109,7 +2565,20 @@ def main():
     w.add_argument("--rpm", type=float, default=None, help="your real RPM (overrides niche guess)")
     w.add_argument("--list", default=None, help="which watchlist to scan (default: active)")
     w.add_argument("--top", type=int, default=25)
+    _add_shared_filters(w)
     w.set_defaults(func=cmd_weekly)
+
+    ti = sub.add_parser("tiers", help="3-tier small-channel study: per-tier median views and top outliers")
+    ti.add_argument("handles", nargs="*", help="channel handles (default: the active watchlist)")
+    ti.add_argument("--list", default=None, help="watchlist to study (added to any handles given)")
+    ti.add_argument("--input", default=None, help="channels JSON (channel_dump shape) instead of fetching, offline")
+    ti.add_argument("--tiers", default=DEFAULT_TIERS, help=f"subscriber bands, lower bound inclusive (default {DEFAULT_TIERS})")
+    ti.add_argument("--top", type=int, default=5, help="outliers to show per tier (default 5)")
+    ti.add_argument("--scan", type=int, default=30, help="recent videos per channel when fetching (default 30)")
+    ti.add_argument("--min-views", type=int, default=0)
+    ti.add_argument("--json", action="store_true", help="print the study as JSON")
+    _add_shared_filters(ti, screen=True)
+    ti.set_defaults(func=cmd_tiers)
 
     pe = sub.add_parser("peers", help="discover same-size peer channels with outsized returns (saves list peers-<list>)")
     pe.add_argument("--list", default="ai", help="niche list name; reads peers-queries-<list>.txt, saves peers-<list> (default ai)")
@@ -2142,6 +2611,8 @@ def main():
     n.add_argument("query")
     n.add_argument("--n", type=int, default=25)
     n.add_argument("--html", action="store_true")
+    n.add_argument("--shorts", choices=SHORTS_MODES, default="exclude",
+                   help="Shorts (<=60s): exclude (default, long-form only), include, or only")
     n.set_defaults(func=cmd_niche)
 
     kw = sub.add_parser("keywords", help="free keyword demand + competition, no API key")
@@ -2179,7 +2650,10 @@ def main():
     m.add_argument("--days", type=int, default=28, help="lookback window (default 28)")
     m.set_defaults(func=cmd_mine)
 
-    args = p.parse_args()
+    return p
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
     args.func(args)
 
 if __name__ == "__main__":
