@@ -1,0 +1,64 @@
+{
+ "label": "ai for small business",
+ "profile": {
+  "handle": "test.account",
+  "posts": 42,
+  "followers": "3,310",
+  "following": 120,
+  "bio": "Synthetic profile for grid tests"
+ },
+ "candidate": {
+  "title": "I fired my software stack",
+  "thumb": "cover.png",
+  "carousel": true
+ },
+ "tiles": [
+  {
+   "title": "Claude Code for total beginners",
+   "channel": "Example Builder",
+   "views": 182000,
+   "age": "3 days ago",
+   "dur": 754,
+   "thumb": "thumb.png"
+  },
+  {
+   "title": "My AI agent runs my shop",
+   "channel": "Shop Owner AI",
+   "views": 41000,
+   "age": "1 week ago",
+   "dur": "18:02",
+   "thumb": "https://i.ytimg.com/vi/vid0001/hqdefault.jpg"
+  },
+  {
+   "title": "<script>alert(1)</script> fake title",
+   "channel": "Bad Actor",
+   "views": 900,
+   "thumb": "javascript:alert(1)"
+  },
+  {
+   "title": "Local AI on a Mac mini",
+   "channel": "Mini Lab",
+   "views_str": "1.2M views",
+   "age": "2 months ago",
+   "dur": 3725
+  },
+  {
+   "title": "Five automations every owner needs",
+   "channel": "Ops Daily",
+   "views": 12000,
+   "carousel": true
+  },
+  {
+   "title": "Missing image tile",
+   "channel": "Nowhere",
+   "views": 3000,
+   "thumb": "does-not-exist.png"
+  },
+  {
+   "title": "Cursor vs Claude: real test",
+   "channel": "Test Bench",
+   "views": 77000,
+   "dur": 1260
+  }
+ ]
+}
