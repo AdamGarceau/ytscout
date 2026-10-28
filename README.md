@@ -82,6 +82,29 @@ scout feed --input tests/fixtures/feed_tiles.json --tv --my-title "I fired my so
 scout feed --input covers.json --grid ig --my-thumb cover-v2.png --pos 0
 ```
 
+**`scout social-audit <export.json> [--tz -5] [--topics 8] [--label NAME] [--out DIR] [--json]`**
+Audits an Instagram or Facebook account from a JSON file you already have. No scraping, no
+network, no model calls. Input is either a Meta "Download your information" JSON (Instagram
+`posts_1.json` / `reels.json`, Facebook `your_posts_1.json`; Meta's mangled UTF-8 is repaired) or
+a simple list (or `{"data": [...]}`) of `{id, caption, media_type, timestamp, like_count,
+comments_count, views|plays, permalink}`. `media_type` takes the Graph API values (`REELS`,
+`VIDEO`, `CAROUSEL_ALBUM`, `IMAGE`, `TEXT`); `timestamp` is unix seconds or ISO-8601.
+Writes `reports/social-audit.json` and a self-contained `reports/social-audit.html` (no scripts)
+with:
+
+- **Format mix**: Reel / Carousel / Single image / Text, share of posts against share of views.
+- **Topic mix**: captions clustered by shared keyword (greedy: the keyword shared by the most
+  remaining posts becomes a topic, up to `--topics`), with per-topic median views and likes.
+- **Outliers**: posts at 3x / 5x / 10x the account median plays (views), or likes when the export
+  has no view counts. Meta's own exports usually carry no metrics, so those get format, topic and
+  cadence only.
+- **Cadence**: posts per week, median and longest gap, posts per month, and a weekday x hour heat
+  table (`--tz` shifts it from UTC).
+
+```
+scout social-audit tests/fixtures/social_simple.json --label "synthetic baker" --tz -5
+```
+
 **`scout title "<proposed title>" [--ai]`**
 Scores a title 0-100 against the data-study rules (6-7 words, <60 chars, no long-form emojis,
 psychological frames). `--ai` generates 5 stronger variants.
