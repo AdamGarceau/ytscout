@@ -1,0 +1,10 @@
+[
+  {"timestamp": 1780927200, "data": [{"post": "Thinking about what to plant next season"}], "title": "Synthetic Page updated its status."},
+  {"timestamp": 1781013600, "data": [{"post": "Bread day"}],
+   "attachments": [{"data": [{"media": {"uri": "photos/x1.jpg", "creation_timestamp": 1781013600, "title": ""}}]}]},
+  {"timestamp": 1781100000, "data": [{"post": "Market haul"}],
+   "attachments": [{"data": [{"media": {"uri": "photos/y1.jpg", "creation_timestamp": 1781100000}},
+                             {"media": {"uri": "photos/y2.jpg", "creation_timestamp": 1781100000}}]}]},
+  {"timestamp": 1781186400, "data": [{"post": "Garden walk video"}],
+   "attachments": [{"data": [{"media": {"uri": "videos/z1.mp4", "creation_timestamp": 1781186400}}]}]}
+]

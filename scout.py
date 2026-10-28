@@ -9,6 +9,7 @@ Commands:
   scout outliers <handle> [--vs h1,h2,...] [--min-views N] [--top N] [--html]
                  [--shorts exclude|include|only] [--since-months 6] [--screen] [--drop-flagged]
   scout tiers [handles...] [--list L] [--input channels.json] [--tiers 1K-10K,10K-50K,50K-250K] [--json]
+  scout social-audit <export.json> [--tz -5] [--topics 8] [--json]
   scout feed "<niche>" | --input tiles.json  [--my-title T] [--my-thumb P] [--tv | --grid yt|tv|ig]
   scout title "<proposed title>" [--ai]
   scout niche "<search query>" [--n N] [--html]
@@ -1837,6 +1838,405 @@ def cmd_tiers(args):
         print(f"  {SCREEN_LEGEND}")
     print()
 
+# ---------- Command: social-audit (Instagram / Facebook export, offline, zero AI) ----------
+# Reads a Meta "Download your information" JSON or a simple list of post dicts. No scraping,
+# no network, no model calls. Topics are keyword clusters, not LLM labels.
+
+SA_FORMATS = ["Reel", "Carousel", "Single image", "Text"]
+SA_TIERS = (10, 5, 3)
+SA_DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+SA_STOP = set("""a about after again all also am an and any are as at be because been before being
+but by can could did do does doing done don't for from get got had has have here how i i'm if in into
+is it it's its just like me more most my new no not now of off on one only or our out over really so
+some than that that's the their them then there these they this those to too up us very was we were
+what when where which who why will with would you your you're yours ours via amp""".split())
+
+def _sa_fix(s):
+    """Meta exports write UTF-8 bytes as latin-1 escapes (\\u00e2\\u0080\\u0099); undo that."""
+    if not isinstance(s, str):
+        return ""
+    try:
+        return s.encode("latin-1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return s
+
+def _sa_num(*vals):
+    for v in vals:
+        if isinstance(v, bool):
+            continue
+        if isinstance(v, (int, float)):
+            return v
+        if isinstance(v, str) and v.strip():
+            try:
+                return _parse_count(v)
+            except (ValueError, TypeError):
+                continue
+    return None
+
+def _sa_ts(v):
+    """Unix seconds (int/str) or ISO-8601 ('2026-05-01T12:00:00+0000') -> unix seconds, else None."""
+    import datetime as dt
+    if isinstance(v, bool) or v in (None, ""):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v / 1000 if v > 1e11 else v)
+    s = str(v).strip()
+    if re.fullmatch(r"\d+(\.\d+)?", s):
+        return _sa_ts(float(s))
+    s = re.sub(r"Z$", "+00:00", s)
+    s = re.sub(r"([+-]\d\d)(\d\d)$", r"\1:\2", s)
+    try:
+        d = dt.datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=dt.timezone.utc)
+    return d.timestamp()
+
+_SA_VIDEO_EXT = (".mp4", ".mov", ".m4v", ".webm")
+
+def _sa_format_from_type(mt, product=None):
+    mt, product = str(mt or "").upper(), str(product or "").upper()
+    if "CAROUSEL" in mt or "ALBUM" in mt:
+        return "Carousel"
+    if "REEL" in mt or "REEL" in product or "VIDEO" in mt:
+        return "Reel"
+    if mt in ("IMAGE", "PHOTO", "SINGLE", "SINGLE_IMAGE", "SINGLE IMAGE"):
+        return "Single image"
+    if mt in ("TEXT", "STATUS", "LINK"):
+        return "Text"
+    return None
+
+def _sa_simple(d):
+    caption = d.get("caption") or d.get("message") or d.get("text") or d.get("title") or ""
+    if isinstance(caption, dict):
+        caption = caption.get("text") or ""
+    fmt = _sa_format_from_type(d.get("media_type") or d.get("type") or d.get("format"),
+                               d.get("media_product_type"))
+    if fmt is None:
+        fmt = "Text" if not (d.get("media_url") or d.get("children")) else "Single image"
+    return {
+        "id": str(d.get("id") or d.get("shortcode") or ""),
+        "caption": str(caption),
+        "format": fmt,
+        "ts": _sa_ts(d.get("timestamp") or d.get("taken_at") or d.get("created_time")
+                     or d.get("creation_timestamp")),
+        "views": _sa_num(d.get("views"), d.get("plays"), d.get("video_views"), d.get("play_count"),
+                         d.get("view_count"), d.get("ig_reels_aggregated_all_plays_count")),
+        "likes": _sa_num(d.get("like_count"), d.get("likes"), d.get("reactions")),
+        "comments": _sa_num(d.get("comments_count"), d.get("comments"), d.get("comment_count")),
+        "permalink": str(d.get("permalink") or d.get("permalink_url") or d.get("url") or ""),
+    }
+
+def _sa_meta_media(post):
+    """Media list from an IG posts_N.json entry or an FB your_posts entry."""
+    media = list(post.get("media") or [])
+    for att in post.get("attachments") or []:
+        for item in (att or {}).get("data") or []:
+            if isinstance(item, dict) and isinstance(item.get("media"), dict):
+                media.append(item["media"])
+    return [m for m in media if isinstance(m, dict)]
+
+def _sa_meta(post, reel=False):
+    media = _sa_meta_media(post)
+    caption = post.get("title") or ""
+    for item in post.get("data") or []:
+        if isinstance(item, dict) and item.get("post"):
+            caption = item["post"]
+    if not caption and media:
+        caption = media[0].get("title") or media[0].get("description") or ""
+    is_video = any(str(m.get("uri", "")).lower().endswith(_SA_VIDEO_EXT) for m in media)
+    if reel or (is_video and len(media) == 1):
+        fmt = "Reel"
+    elif len(media) > 1:
+        fmt = "Carousel"
+    elif media:
+        fmt = "Single image"
+    else:
+        fmt = "Text"
+    ts = post.get("creation_timestamp") or post.get("timestamp") or (media[0].get("creation_timestamp") if media else None)
+    stats = {}
+    for m in media[:1]:
+        stats.update(m.get("media_metadata", {}).get("insights") or {})
+    stats.update(post.get("insights") or {})
+    simple = _sa_simple(dict(stats, **{k: v for k, v in post.items() if k in (
+        "id", "views", "plays", "like_count", "likes", "comments_count", "comments", "permalink")}))
+    return dict(simple, caption=_sa_fix(caption), format=fmt, ts=_sa_ts(ts))
+
+def load_social_export(path):
+    """Returns (posts, source) where source is 'simple' or 'meta'. Posts carry
+    id, caption, format, ts, views, likes, comments, permalink."""
+    data = json.load(open(path, encoding="utf-8"))
+    posts, source = [], "simple"
+    if isinstance(data, dict):
+        if "ig_reels_media" in data:
+            return [_sa_meta(p, reel=True) for p in data["ig_reels_media"] if isinstance(p, dict)], "meta"
+        for key in ("data", "posts", "media", "items"):
+            if isinstance(data.get(key), list):
+                data = data[key]; break
+        else:
+            data = []
+    for d in data if isinstance(data, list) else []:
+        if not isinstance(d, dict):
+            continue
+        if any(k in d for k in ("media_type", "caption", "like_count", "permalink", "plays", "views")):
+            posts.append(_sa_simple(d))
+        elif any(k in d for k in ("media", "attachments", "creation_timestamp")) or (
+                "timestamp" in d and isinstance(d.get("data"), list)):
+            posts.append(_sa_meta(d)); source = "meta"
+        else:
+            posts.append(_sa_simple(d))
+    return posts, source
+
+def _sa_tokens(caption):
+    words = re.findall(r"#?[a-z0-9][a-z0-9']+", (caption or "").lower())
+    out = set()
+    for w in words:
+        w = w.lstrip("#").strip("'")
+        if len(w) < 3 or w in SA_STOP or w.isdigit():
+            continue
+        if len(w) > 4 and w.endswith("s") and not w.endswith("ss"):
+            w = w[:-1]
+        out.add(w)
+    return out
+
+def _sa_topics(posts, max_topics=8, min_posts=2):
+    """Greedy keyword clustering: repeatedly take the keyword shared by the most still-unassigned
+    posts (ties alphabetical), assign those posts to it. Leftovers go to 'other'."""
+    toks = [_sa_tokens(p["caption"]) for p in posts]
+    left = set(range(len(posts)))
+    topics = []
+    while left and len(topics) < max_topics:
+        counts = {}
+        for i in left:
+            for w in toks[i]:
+                counts[w] = counts.get(w, 0) + 1
+        if not counts:
+            break
+        word, n = min(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        if n < min_posts:
+            break
+        members = sorted(i for i in left if word in toks[i])
+        # name the cluster by its two most common words, keyword first
+        co = {}
+        for i in members:
+            for w in toks[i] - {word}:
+                co[w] = co.get(w, 0) + 1
+        second = min(co.items(), key=lambda kv: (-kv[1], kv[0])) if co else None
+        label = word + (f" / {second[0]}" if second and second[1] >= max(2, len(members) / 2) else "")
+        topics.append((word, label, members))
+        left -= set(members)
+    if left:
+        topics.append(("other", "other", sorted(left)))
+    return topics
+
+def _sa_median(xs):
+    xs = [x for x in xs if x is not None]
+    return statistics.median(xs) if xs else None
+
+def social_audit(posts, tz_offset=0.0, max_topics=8, source="simple"):
+    """The whole audit as a JSON-able dict. Pure: no I/O."""
+    n = len(posts)
+    has_views = any(p["views"] is not None for p in posts)
+    has_likes = any(p["likes"] is not None for p in posts)
+    total_views = sum(p["views"] or 0 for p in posts)
+    share = lambda a, b: round(a / b, 4) if b else None
+
+    fmt = []
+    for f in SA_FORMATS:
+        ps = [p for p in posts if p["format"] == f]
+        v = sum(p["views"] or 0 for p in ps)
+        fmt.append({"format": f, "posts": len(ps), "share_posts": share(len(ps), n),
+                    "views": v if has_views else None,
+                    "share_views": share(v, total_views) if has_views else None,
+                    "median_views": _sa_median(p["views"] for p in ps),
+                    "median_likes": _sa_median(p["likes"] for p in ps)})
+
+    topics, topic_of = [], {}
+    for word, label, idx in _sa_topics(posts, max_topics=max_topics):
+        ps = [posts[i] for i in idx]
+        topic_of.update((i, label) for i in idx)
+        topics.append({"topic": label, "keyword": word, "posts": len(ps), "share_posts": share(len(ps), n),
+                       "median_views": _sa_median(p["views"] for p in ps),
+                       "median_likes": _sa_median(p["likes"] for p in ps),
+                       "examples": [p["caption"][:80] for p in ps[:3]]})
+
+    metric = "views" if has_views else ("likes" if has_likes else None)
+    med = _sa_median(p[metric] for p in posts) if metric else None
+    outliers = []
+    if metric and med:
+        for i, p in enumerate(posts):
+            val = p[metric]
+            if val is None:
+                continue
+            mult = val / med
+            tier = next((t for t in SA_TIERS if mult >= t), None)
+            if tier:
+                outliers.append({"id": p["id"], "caption": p["caption"][:140], "format": p["format"],
+                                 "topic": topic_of.get(i), metric: val, "mult": round(mult, 2),
+                                 "tier": f"{tier}x", "permalink": p["permalink"],
+                                 "date": _sa_date(p["ts"], tz_offset)})
+        outliers.sort(key=lambda o: -o["mult"])
+    tier_counts = {f"{t}x": sum(1 for o in outliers if o["tier"] == f"{t}x") for t in SA_TIERS}
+
+    return {"source": source, "posts": n, "has_views": has_views, "has_likes": has_likes,
+            "formats": fmt, "topics": topics,
+            "outliers": {"metric": metric, "median": med, "tiers": tier_counts, "posts": outliers},
+            "cadence": _sa_cadence(posts, tz_offset), "tz_offset": tz_offset}
+
+def _sa_local(ts, tz_offset):
+    import datetime as dt
+    return dt.datetime.fromtimestamp(ts, dt.timezone.utc) + dt.timedelta(hours=tz_offset)
+
+def _sa_date(ts, tz_offset):
+    return _sa_local(ts, tz_offset).strftime("%Y-%m-%d") if ts is not None else None
+
+def _sa_cadence(posts, tz_offset):
+    timed = sorted((p for p in posts if p["ts"] is not None), key=lambda p: p["ts"])
+    heat = [[0] * 24 for _ in range(7)]
+    day_views = [[] for _ in range(7)]
+    months = {}
+    for p in timed:
+        d = _sa_local(p["ts"], tz_offset)
+        heat[d.weekday()][d.hour] += 1
+        day_views[d.weekday()].append(p["views"])
+        months[d.strftime("%Y-%m")] = months.get(d.strftime("%Y-%m"), 0) + 1
+    gaps = [(b["ts"] - a["ts"]) / 86400 for a, b in zip(timed, timed[1:])]
+    span = (timed[-1]["ts"] - timed[0]["ts"]) / 86400 if len(timed) > 1 else 0
+    by_day = [{"day": SA_DAYS[i], "posts": sum(heat[i]), "median_views": _sa_median(day_views[i])}
+              for i in range(7)]
+    hours = [sum(heat[d][h] for d in range(7)) for h in range(24)]
+    busiest = max(range(24), key=lambda h: (hours[h], -h)) if timed else None
+    return {"timed_posts": len(timed), "untimed_posts": len(posts) - len(timed),
+            "first": _sa_date(timed[0]["ts"], tz_offset) if timed else None,
+            "last": _sa_date(timed[-1]["ts"], tz_offset) if timed else None,
+            "span_days": round(span, 1),
+            "posts_per_week": round(len(timed) / (span / 7), 2) if span >= 1 else None,
+            "median_gap_days": round(statistics.median(gaps), 2) if gaps else None,
+            "longest_gap_days": round(max(gaps), 1) if gaps else None,
+            "per_month": [{"month": m, "posts": c} for m, c in sorted(months.items())],
+            "by_day": by_day, "busiest_hour": busiest, "heat": heat}
+
+def _sa_pct(x):
+    return "n/a" if x is None else f"{x * 100:.0f}%"
+
+def _sa_h(x):
+    return "n/a" if x is None else human(x)
+
+_SA_CSS = """
+.sa-sec { margin-bottom:56px; }
+.bar { height:8px; background:var(--hairline); border-radius:2px; min-width:80px; }
+.bar i { display:block; height:8px; background:var(--ink); border-radius:2px; }
+.bar.v i { background:var(--ember); }
+table.heat { border-collapse:collapse; font-family:var(--font-data); font-size:11px; }
+table.heat th { color:var(--muted); font-weight:500; padding:2px 3px; text-align:center; }
+table.heat td { width:22px; height:22px; text-align:center; border:1px solid var(--ground); }
+.tier { font-family:var(--font-data); font-weight:700; }
+.tier.t10 { color:var(--ember); }
+.stats { display:flex; flex-wrap:wrap; gap:40px; margin-top:18px; }
+.stats div { font-family:var(--font-data); font-size:13px; color:var(--muted); }
+.stats b { display:block; font-family:var(--font-display); font-size:28px; color:var(--ink); letter-spacing:-0.02em; }
+.scroll { overflow-x:auto; }
+"""
+
+def _sa_bar(x, cls=""):
+    w = 0 if not x else max(1, round(x * 100))
+    return f"<div class='bar {cls}'><i style='width:{w}%'></i></div>"
+
+def _write_social_audit_html(res, label, path):
+    e = _dash_esc
+    num = lambda x: f"<td class=num>{e(x)}</td>"
+    rows = lambda rs: "".join(f"<tr{' class=alt' if i % 2 else ''}>{r}</tr>" for i, r in enumerate(rs))
+    fmt_rows = rows(
+        f"<td>{e(f['format'])}</td>{num(f['posts'])}{num(_sa_pct(f['share_posts']))}"
+        f"<td>{_sa_bar(f['share_posts'])}</td>{num(_sa_pct(f['share_views']))}"
+        f"<td>{_sa_bar(f['share_views'], 'v')}</td>{num(_sa_h(f['median_views']))}{num(_sa_h(f['median_likes']))}"
+        for f in res["formats"])
+    top_rows = rows(
+        f"<td>{e(t['topic'])}</td>{num(t['posts'])}{num(_sa_pct(t['share_posts']))}"
+        f"{num(_sa_h(t['median_views']))}{num(_sa_h(t['median_likes']))}<td>{e(' | '.join(t['examples']))}</td>"
+        for t in res["topics"])
+    o = res["outliers"]
+    m = o["metric"]
+    def cap(x):
+        c = e(x["caption"] or "(no caption)")
+        return f"<a href='{e(x['permalink'])}'>{c}</a>" if x["permalink"].startswith("https://") else c
+    out_rows = rows(
+        f"<td><span class='tier t{x['tier'][:-1]}'>{e(x['tier'])}</span></td>{num(f"{x['mult']:.1f}x")}"
+        f"{num(_sa_h(x[m]))}<td>{e(x['format'])}</td><td>{e(x['topic'] or '')}</td><td>{e(x['date'] or '')}</td><td>{cap(x)}</td>"
+        for x in o["posts"]) or "<tr><td class=empty colspan=7>No post reached 3x the account median.</td></tr>"
+    c = res["cadence"]
+    peak = max([max(r) for r in c["heat"]] + [1])
+    heat = "<tr><th></th>" + "".join(f"<th>{h}</th>" for h in range(24)) + "<th>Σ</th><th>med</th></tr>"
+    for d, r in enumerate(c["heat"]):
+        cells = "".join(
+            f"<td style='background:rgba(217,84,30,{v / peak * 0.9 + 0.05 if v else 0:.2f})' title='{SA_DAYS[d]} {h}:00, {v} posts'>{v or ''}</td>"
+            for h, v in enumerate(r))
+        bd = c["by_day"][d]
+        heat += f"<tr><th>{SA_DAYS[d]}</th>{cells}<th>{bd['posts']}</th><th>{e(_sa_h(bd['median_views']))}</th></tr>"
+    month_rows = rows(f"<td>{e(x['month'])}</td>{num(x['posts'])}" for x in c["per_month"])
+    tz = f"UTC{res['tz_offset']:+g}" if res["tz_offset"] else "UTC"
+    metric_note = {"views": "plays/views", "likes": "likes (no view counts in this export)"}.get(m, "no metrics in this export")
+    stat = lambda k, v: f"<div><b>{e(v)}</b>{e(k)}</div>"
+    hero = o["posts"][0]["mult"] if o["posts"] else 0
+    doc = f"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+<title>ytscout social audit</title><style>{_DASH_CSS}{_SA_CSS}</style>
+<div class=wrap>
+<div class=page-head><p class=eyebrow>ytscout · social audit · {e(res['source'])} export</p>
+<h1>Social audit: {e(label)}</h1>
+<p>{res['posts']} posts read from a local export. Outliers are measured on {e(metric_note)}. Topics are keyword clusters from captions, no AI. Times in {e(tz)}.</p></div>
+<div class=hero><p class=label>Top post vs account median</p><p class=hero-num>{hero:.1f}x</p>
+<p class=hero-sub>{o['tiers']['10x']} posts at 10x+, {o['tiers']['5x']} at 5-10x, {o['tiers']['3x']} at 3-5x. Account median {e(_sa_h(o['median']))} {e(m or '')}.</p></div>
+<div class=sa-sec><h2>Format mix</h2><p>Share of posts (ink) against share of views (ember). A format whose ember bar outruns its ink bar is earning more than its slot.</p>
+<div class=scroll><table class=outliers><tr><th>Format</th><th class=num>Posts</th><th class=num>Share</th><th></th><th class=num>Views share</th><th></th><th class=num>Med views</th><th class=num>Med likes</th></tr>{fmt_rows}</table></div></div>
+<div class=sa-sec><h2>Topic mix</h2><p>Each post sits in one cluster: the keyword shared by the most remaining captions.</p>
+<div class=scroll><table class=outliers><tr><th>Topic</th><th class=num>Posts</th><th class=num>Share</th><th class=num>Med views</th><th class=num>Med likes</th><th>Examples</th></tr>{top_rows}</table></div></div>
+<div class=sa-sec><h2>Outliers</h2><p>Posts at 3x, 5x and 10x the account median {e(m or '')}.</p>
+<div class=scroll><table class=outliers><tr><th>Tier</th><th class=num>vs Med</th><th class=num>{e((m or '').title())}</th><th>Format</th><th>Topic</th><th>Date</th><th>Caption</th></tr>{out_rows}</table></div></div>
+<div class=sa-sec><h2>Posting cadence</h2>
+<div class=stats>{stat('posts per week', c['posts_per_week'] if c['posts_per_week'] is not None else 'n/a')}{stat('median gap, days', c['median_gap_days'] if c['median_gap_days'] is not None else 'n/a')}{stat('longest gap, days', c['longest_gap_days'] if c['longest_gap_days'] is not None else 'n/a')}{stat('busiest hour', f"{c['busiest_hour']}:00" if c['busiest_hour'] is not None else 'n/a')}</div>
+<p style="margin-top:18px">{e(c['first'] or '')} to {e(c['last'] or '')}{f", {c['untimed_posts']} posts without a timestamp" if c['untimed_posts'] else ''}.</p>
+<h2 style="margin-top:40px">Day / hour</h2><p>Posts per weekday and hour ({e(tz)}); last columns are the day total and the day's median views.</p>
+<div class=scroll><table class=heat>{heat}</table></div>
+<h2 style="margin-top:40px">Per month</h2><table class=outliers style="max-width:320px"><tr><th>Month</th><th class=num>Posts</th></tr>{month_rows}</table></div>
+<div class=page-foot><p>Built offline from your own export. No scraping, no network, no model calls. A multiple is a reason to study the post, not a verdict.</p></div>
+</div>"""
+    open(path, "w", encoding="utf-8").write(doc)
+    return path
+
+def cmd_social_audit(args):
+    try:
+        posts, source = load_social_export(args.export)
+    except (OSError, ValueError) as ex:
+        print(f"  ! could not read {args.export}: {ex}"); return
+    if not posts:
+        print(f"  ! no posts found in {args.export}"); return
+    res = social_audit(posts, tz_offset=args.tz, max_topics=args.topics, source=source)
+    label = args.label or os.path.splitext(os.path.basename(args.export))[0]
+    out = args.out or REPORT_DIR
+    os.makedirs(out, exist_ok=True)
+    jpath = os.path.join(out, "social-audit.json")
+    json.dump(dict(res, label=label), open(jpath, "w", encoding="utf-8"), indent=2)
+    hpath = _write_social_audit_html(res, label, os.path.join(out, "social-audit.html"))
+    if args.json:
+        print(json.dumps(dict(res, label=label), indent=2)); return
+    print(f"\n  SOCIAL AUDIT: {label} · {res['posts']} posts ({source} export)\n")
+    print(table([[f["format"], f["posts"], _sa_pct(f["share_posts"]), _sa_pct(f["share_views"]),
+                  _sa_h(f["median_views"])] for f in res["formats"]],
+                ["Format", "Posts", "Share", "Views share", "Med views"]))
+    print()
+    print(table([[t["topic"], t["posts"], _sa_h(t["median_views"]), _sa_h(t["median_likes"])]
+                 for t in res["topics"]], ["Topic", "Posts", "Med views", "Med likes"]))
+    o = res["outliers"]
+    print(f"\n  Outliers on {o['metric'] or 'n/a'} (median {_sa_h(o['median'])}): "
+          + f"10x+ {o['tiers']['10x']}, 5-10x {o['tiers']['5x']}, 3-5x {o['tiers']['3x']}")
+    for x in o["posts"][:10]:
+        print(f"   {x['tier']:>4} {x['mult']:>6.1f}x  {x['format']:<12} {x['caption'][:60]}")
+    c = res["cadence"]
+    print(f"\n  Cadence: {c['posts_per_week'] or 'n/a'}/week, median gap {c['median_gap_days'] or 'n/a'}d, "
+          f"longest {c['longest_gap_days'] or 'n/a'}d, busiest hour {c['busiest_hour']}:00")
+    print(f"  → JSON: {jpath}\n  → HTML report: {hpath}\n")
+
 # ---------- Command: dash (offline HTML assembly, zero AI, zero network by default) ----------
 # Pure read/render layer. Nothing below may import yt_dlp or call ollama/_ydl/_fetch_json/
 # channel_dump/search_dump/_curl_json or open a socket. cmd_dash's --refresh branch is the
@@ -2579,6 +2979,15 @@ def build_parser():
     ti.add_argument("--json", action="store_true", help="print the study as JSON")
     _add_shared_filters(ti, screen=True)
     ti.set_defaults(func=cmd_tiers)
+
+    sa = sub.add_parser("social-audit", help="audit an Instagram/Facebook export: formats, topics, outliers, cadence (offline)")
+    sa.add_argument("export", help="Meta 'Download your information' JSON, or a list of post dicts")
+    sa.add_argument("--tz", type=float, default=0.0, help="hours offset from UTC for the day/hour table (e.g. -5)")
+    sa.add_argument("--topics", type=int, default=8, help="max keyword topics (default 8)")
+    sa.add_argument("--label", default=None, help="account name for the report (default: file name)")
+    sa.add_argument("--out", default=None, help="output folder (default reports/)")
+    sa.add_argument("--json", action="store_true", help="print the audit as JSON")
+    sa.set_defaults(func=cmd_social_audit)
 
     pe = sub.add_parser("peers", help="discover same-size peer channels with outsized returns (saves list peers-<list>)")
     pe.add_argument("--list", default="ai", help="niche list name; reads peers-queries-<list>.txt, saves peers-<list> (default ai)")
